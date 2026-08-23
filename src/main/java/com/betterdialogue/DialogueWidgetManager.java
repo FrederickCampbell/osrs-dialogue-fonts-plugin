@@ -22,102 +22,63 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.betterdialogue;
 
+import java.awt.Color;
+import java.awt.Rectangle;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+import javax.inject.Inject;
+import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.widgets.InterfaceID;
 import net.runelite.api.widgets.Widget;
-
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import java.awt.Color;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.regex.Pattern;
+import net.runelite.api.widgets.WidgetType;
 
 /**
- * Detects active dialogue widgets each client tick, extracts their text into a
- * {@link DialogueState} snapshot, and hides the original widget text so the
- * {@link BetterDialogueOverlay} can paint its own replacement text on top.
+ * Compatibility-first last-mile dialogue capture.
  *
- * <h3>Capture-then-blank contract</h3>
- * Widget text is only parsed into the per-type cache when {@code getText()}
- * returns a non-empty string (i.e. on the first frame the engine provides new
- * dialogue text).  On every subsequent frame the widget is already blank
- * (because we called {@code setText("")} the previous frame), so we leave the
- * cache untouched and the overlay continues to render the last good snapshot.
- * This prevents the "blank frame" bug where a freshly-blanked widget produces
- * an empty segment list and the overlay paints nothing.
+ * Dialogue Fonts+ owns rendering only. Jagex/Quest Helper/other plugins keep
+ * ownership of semantic widget state:
+ * - text is NEVER rewritten
+ * - colors are NEVER rewritten
+ * - listeners/hotkeys are NEVER rewritten
+ * - Quest Helper [1]/[2]/etc. prefixes remain live
  *
- * <h3>Cache lifetime</h3>
- * When the active dialogue type changes (or no dialogue is open), the cache for
- * the previously active type is cleared.  This prevents a stale cache from
- * one NPC flashing briefly when a new NPC's dialogue opens.
+ * Before native rasterization, only the widget's native font archive ID is
+ * temporarily set to -1. The live text/color/listeners remain untouched.
  *
- * <h3>Widget child indices</h3>
- * The indices below are approximate.  <strong>Verify with the in-game Widget
- * Inspector</strong> — they can change after game updates.
- *
- * <table>
- *   <tr><th>Type</th><th>InterfaceID</th><th>Name</th><th>Text</th><th>Continue</th></tr>
- *   <tr><td>NPC</td><td>DIALOG_NPC (231)</td><td>static 4</td><td>static 6</td><td>static 5</td></tr>
- *   <tr><td>Player</td><td>DIALOG_PLAYER (217)</td><td>static 4</td><td>static 6</td><td>static 5</td></tr>
- *   <tr><td>Options</td><td>DIALOG_OPTION (219)</td><td>dyn[0] of static 1</td><td>dyn[1..n] of static 1</td><td>—</td></tr>
- *   <tr><td>Sprite</td><td>DIALOG_SPRITE (193)</td><td>—</td><td>static 2</td><td>dyn[2] of static 0</td></tr>
- * </table>
+ * A high-priority BeforeRender callback restores those font IDs before other
+ * plugins run; a low-priority callback captures their final state and suppresses
+ * the native font again. This creates a render-only suppression window.
  */
 @Slf4j
 @Singleton
 public class DialogueWidgetManager
 {
-	// -------------------------------------------------------------------------
-	// Widget child indices (verify with Widget Inspector)
-	// -------------------------------------------------------------------------
+	private static final int NPC_CHILD_NAME = 4;
+	private static final int NPC_CHILD_STATUS = 5;
+	private static final int NPC_CHILD_TEXT = 6;
 
-	/**
-	 * Text colour used to camouflage option-menu widget text against the
-	 * parchment background.  The engine key handler (1–5 shortcuts) reads
-	 * widget text content, not colour, so keeping the text intact while making
-	 * it invisible preserves keyboard selection.
-	 * Value matches the vanilla OSRS dialogue parchment: {@code #D6CCAF}.
-	 */
-	static final int OPTION_CAMOUFLAGE_COLOR = 0xD6CCAF;
+	private static final int PLAYER_CHILD_NAME = 4;
+	private static final int PLAYER_CHILD_STATUS = 5;
+	private static final int PLAYER_CHILD_TEXT = 6;
 
-	private static final int NPC_CHILD_NAME     = 4;
-	private static final int NPC_CHILD_TEXT     = 6;
-	private static final int NPC_CHILD_CONTINUE = 5;
+	private static final int SPRITE_CHILD_TEXT = 2;
 
-	private static final int PLAYER_CHILD_NAME     = 4;
-	private static final int PLAYER_CHILD_TEXT     = 6;
-	private static final int PLAYER_CHILD_CONTINUE = 5;
+	private static final int MAX_SCAN_CHILD = 32;
+	private static final int MAX_SCAN_DEPTH = 5;
 
-	// Option dialogue (InterfaceID.DIALOG_OPTION)
-	// Container: static child 1.  Title and options are dynamic children of that container.
-	//   Dynamic[0] = title "Select an option" (HasListener=false, color=0x800000)
-	//   Dynamic[1..n] = clickable option rows  (HasListener=true)
-	// NOTE: there are NO useful static child constants here — access is via getDynamicChildren().
-
-	// Sprite dialogue (InterfaceID.DIALOG_SPRITE = 193)
-	//   S 193.1  Objectbox.ITEM  — item/skill sprite (static child 1)
-	//   S 193.2  Objectbox.TEXT  — body text         (static child 2)
-	//   N 193.0  Objectbox.UNIVERSE — container (nested)
-	//     D 193.0[2]  "Click here to continue"  — DYNAMIC child 2 of 193.0 (HasListener=true)
-	private static final int SPRITE_CHILD_TEXT         = 2; // static child of 193
-	static final int          SPRITE_CONTINUE_DYN_INDEX = 2; // dynamic child of 193.0
-
-	// -------------------------------------------------------------------------
-	// Tag parsing
-	// -------------------------------------------------------------------------
-
-	private static final Pattern TAG_STRIP = Pattern.compile("<[^>]*>");
-
-	// -------------------------------------------------------------------------
-	// Injected dependencies
-	// -------------------------------------------------------------------------
+	private static final Pattern TAG_STRIP =
+		Pattern.compile("<[^>]*>");
 
 	@Inject
 	private Client client;
@@ -125,595 +86,864 @@ public class DialogueWidgetManager
 	@Inject
 	private BetterDialogueConfig config;
 
-	// -------------------------------------------------------------------------
-	// Original-text store (for shutdown restoration)
-	// -------------------------------------------------------------------------
+	@Inject
+	private DialogueDiagnostics diagnostics;
 
-	/** Maps each blanked widget to its original text so it can be restored on shutdown. */
-	private final Map<Widget, String> savedTexts = new HashMap<>();
+	private final Map<Widget, Integer> suppressedFontIds =
+		new IdentityHashMap<>();
 
-	/**
-	 * Maps each camouflaged option widget to its original text colour so it
-	 * can be restored on shutdown.  Option widgets are camouflaged rather than
-	 * blanked so the engine key handler (1–5) can still read their text.
-	 */
-	private final Map<Widget, Integer> savedColors = new HashMap<>();
-
-	// -------------------------------------------------------------------------
-	// Per-type text caches
-	//
-	// These are populated ONLY when the engine provides non-empty widget text.
-	// They are preserved on frames where the widget is already blank (because we
-	// blanked it ourselves), ensuring the overlay always has something to paint.
-	// -------------------------------------------------------------------------
-
-	private List<TextSegment> cachedNpcBody     = Collections.emptyList();
-	private String            cachedNpcName     = "";
-	private String            cachedNpcContinue = "";
-
-	private List<TextSegment> cachedPlayerBody     = Collections.emptyList();
-	private String            cachedPlayerName     = "";
-	private String            cachedPlayerContinue = "";
-
-	private List<TextSegment> cachedSpriteBody     = Collections.emptyList();
-	private String            cachedSpriteContinue = "";
-
-	private List<String> cachedOptionTexts   = Collections.emptyList();
-	private Widget[]     cachedOptionWidgets = new Widget[0];
-	private String       cachedOptionTitle   = "";
-	/**
-	 * Stable reference to the title dynamic child widget (dynamic index 0 of the
-	 * options container).  Preserved across frames so {@link BetterDialogueOverlay}
-	 * can re-camouflage it in {@code reBlankWidgets()} even on frames where the
-	 * text colour has already been set.
-	 */
-	private Widget       cachedOptionTitleWidget = null;
-
-	/** Which dialogue type was active on the previous call to {@link #getCurrentDialogue()}. */
-	private DialogueType lastSeenType = null;
-
-
-	// -------------------------------------------------------------------------
-	// Public API
-	// -------------------------------------------------------------------------
-
-	/**
-	 * Returns a {@link DialogueState} for whichever dialogue is currently
-	 * visible, or {@code null} if no supported dialogue is open.
-	 * Call once per client tick from the plugin's event handler.
-	 */
-	public DialogueState getCurrentDialogue()
+	public DialogueState captureAndTemporarilySuppress()
 	{
-		DialogueState state = detectAndBuild();
+		// Safety net. Normally the high-priority BeforeRender callback already
+		// restored these before Quest Helper/other plugin handlers ran.
+		restoreSuppressedFontsForPluginLogic();
 
-		DialogueType currentType = state != null ? state.getType() : null;
+		Widget npcRoot =
+			client.getWidget(InterfaceID.DIALOG_NPC, 0);
 
-		// When the active type changes (or dialogue closes), clear the stale cache
-		// for the type that just went away so its text can't bleed into the next dialogue.
-		if (currentType != lastSeenType)
-		{
-			clearCacheFor(lastSeenType);
-			lastSeenType = currentType;
-		}
-
-		return state;
-	}
-
-	/**
-	 * Restores every widget whose text was blanked and clears all caches.
-	 * Must be called from the plugin's {@code shutDown()} so nothing is left
-	 * in a broken state after the plugin is disabled.
-	 */
-	public void restoreAll()
-	{
-		for (Map.Entry<Widget, String> entry : savedTexts.entrySet())
-		{
-			try
-			{
-				entry.getKey().setText(entry.getValue());
-			}
-			catch (Exception e)
-			{
-				log.warn("Failed to restore widget text", e);
-			}
-		}
-		savedTexts.clear();
-
-		for (Map.Entry<Widget, Integer> entry : savedColors.entrySet())
-		{
-			try
-			{
-				entry.getKey().setTextColor(entry.getValue());
-			}
-			catch (Exception e)
-			{
-				log.warn("Failed to restore widget text color", e);
-			}
-		}
-		savedColors.clear();
-
-		clearCacheFor(DialogueType.NPC_DIALOGUE);
-		clearCacheFor(DialogueType.PLAYER_DIALOGUE);
-		clearCacheFor(DialogueType.OPTION_DIALOGUE);
-		clearCacheFor(DialogueType.SPRITE_DIALOGUE);
-		lastSeenType = null;
-	}
-
-	// -------------------------------------------------------------------------
-	// Detection + state builders
-	// -------------------------------------------------------------------------
-
-	private DialogueState detectAndBuild()
-	{
-		Widget npcRoot = client.getWidget(InterfaceID.DIALOG_NPC, 0);
 		if (isVisible(npcRoot) && config.replaceNpc())
 		{
-			return buildNpcState();
+			return buildCharacterState(
+				DialogueType.NPC_DIALOGUE,
+				InterfaceID.DIALOG_NPC,
+				NPC_CHILD_NAME,
+				NPC_CHILD_TEXT,
+				NPC_CHILD_STATUS
+			);
 		}
 
-		Widget playerRoot = client.getWidget(InterfaceID.DIALOG_PLAYER, 0);
-		if (isVisible(playerRoot) && config.replacePlayer())
+		Widget playerRoot =
+			client.getWidget(InterfaceID.DIALOG_PLAYER, 0);
+
+		if (isVisible(playerRoot) &&
+			config.replacePlayer())
 		{
-			return buildPlayerState();
+			return buildCharacterState(
+				DialogueType.PLAYER_DIALOGUE,
+				InterfaceID.DIALOG_PLAYER,
+				PLAYER_CHILD_NAME,
+				PLAYER_CHILD_TEXT,
+				PLAYER_CHILD_STATUS
+			);
 		}
 
-		// Options container lives at DIALOG_OPTION static child 1 (confirmed via Widget Inspector).
-		// Its dynamic children hold the title [0] and clickable options [1..n].
-		Widget optionContainer = client.getWidget(InterfaceID.DIALOG_OPTION, 1);
-		if (isVisible(optionContainer) && config.replaceOptions())
+		Widget optionContainer =
+			client.getWidget(InterfaceID.DIALOG_OPTION, 1);
+
+		if (isVisible(optionContainer) &&
+			config.replaceOptions())
 		{
-			return buildOptionState();
+			return buildOptionState(optionContainer);
 		}
 
-		Widget spriteRoot = client.getWidget(InterfaceID.DIALOG_SPRITE, 0);
-		if (isVisible(spriteRoot) && config.replaceSprite())
+		Widget spriteRoot =
+			client.getWidget(InterfaceID.DIALOG_SPRITE, 0);
+
+		if (isVisible(spriteRoot) &&
+			config.replaceSprite())
 		{
-			return buildSpriteState();
+			return buildSpriteState(spriteRoot);
 		}
 
 		return null;
 	}
 
-	private DialogueState buildNpcState()
+	public void restoreSuppressedFontsForPluginLogic()
 	{
-		Widget nameWidget     = client.getWidget(InterfaceID.DIALOG_NPC, NPC_CHILD_NAME);
-		Widget textWidget     = client.getWidget(InterfaceID.DIALOG_NPC, NPC_CHILD_TEXT);
-		Widget continueWidget = client.getWidget(InterfaceID.DIALOG_NPC, NPC_CHILD_CONTINUE);
-
-		if (textWidget == null)
+		if (suppressedFontIds.isEmpty())
 		{
-			return null;
+			return;
 		}
 
-		// ---- Capture: only update cache when the engine has real text ----
-		String raw = textWidget.getText();
-		if (raw != null && !raw.isEmpty())
+		for (Map.Entry<Widget, Integer> entry :
+			new ArrayList<>(suppressedFontIds.entrySet()))
 		{
-			cachedNpcBody = parseSegments(raw, Color.BLACK);
-			cachedNpcName = nameWidget != null ? stripTags(nameWidget.getText()) : "";
-		}
-
-		// Capture continue text (e.g. "Click here to continue" / "Please wait...")
-		if (continueWidget != null)
-		{
-			String rawContinue = continueWidget.getText();
-			if (rawContinue != null && !rawContinue.isEmpty())
+			try
 			{
-				cachedNpcContinue = stripTags(rawContinue);
+				Widget widget = entry.getKey();
+				int originalFontId = entry.getValue();
+
+				if (widget.getFontId() == -1)
+				{
+					diagnostics.recordFontMutation(
+						"before-plugin-render",
+						"RESTORE_NATIVE_FONT",
+						widget,
+						-1,
+						originalFontId
+					);
+
+					widget.setFontId(originalFontId);
+				}
+			}
+			catch (Exception ex)
+			{
+				log.debug(
+					"Unable to restore dialogue widget font",
+					ex
+				);
 			}
 		}
 
-		// ---- Blank name + body; camouflage continue so spacebar still works ----
-		blankWidget(textWidget);
-		blankWidget(nameWidget);
-		camouflageWidget(continueWidget); // setTextColor, not setText("") — engine needs text for spacebar
-
-		// If we've never seen any text yet, nothing to render
-		if (cachedNpcBody.isEmpty())
-		{
-			return null;
-		}
-
-		// ---- Build state from cache + live widget refs ----
-		return new DialogueState(
-			DialogueType.NPC_DIALOGUE,
-			cachedNpcName,
-			cachedNpcBody,
-			null,
-			textWidget,
-			nameWidget,
-			continueWidget,
-			null,
-			cachedNpcContinue
-		);
+		suppressedFontIds.clear();
 	}
 
-	private DialogueState buildPlayerState()
+	public void restoreAll()
 	{
-		Widget nameWidget     = client.getWidget(InterfaceID.DIALOG_PLAYER, PLAYER_CHILD_NAME);
-		Widget textWidget     = client.getWidget(InterfaceID.DIALOG_PLAYER, PLAYER_CHILD_TEXT);
-		Widget continueWidget = client.getWidget(InterfaceID.DIALOG_PLAYER, PLAYER_CHILD_CONTINUE);
-
-		if (textWidget == null)
-		{
-			return null;
-		}
-
-		String raw = textWidget.getText();
-		if (raw != null && !raw.isEmpty())
-		{
-			cachedPlayerBody = parseSegments(raw, Color.BLACK);
-			cachedPlayerName = nameWidget != null ? stripTags(nameWidget.getText()) : "";
-		}
-
-		// Capture continue text
-		if (continueWidget != null)
-		{
-			String rawContinue = continueWidget.getText();
-			if (rawContinue != null && !rawContinue.isEmpty())
-			{
-				cachedPlayerContinue = stripTags(rawContinue);
-			}
-		}
-
-		blankWidget(textWidget);
-		blankWidget(nameWidget);
-		camouflageWidget(continueWidget); // setTextColor, not setText("") — engine needs text for spacebar
-
-		if (cachedPlayerBody.isEmpty())
-		{
-			return null;
-		}
-
-		return new DialogueState(
-			DialogueType.PLAYER_DIALOGUE,
-			cachedPlayerName,
-			cachedPlayerBody,
-			null,
-			textWidget,
-			nameWidget,
-			continueWidget,
-			null,
-			cachedPlayerContinue
-		);
+		restoreSuppressedFontsForPluginLogic();
 	}
 
-	private DialogueState buildOptionState()
+	private DialogueState buildCharacterState(
+		DialogueType type,
+		int groupId,
+		int nameChild,
+		int bodyChild,
+		int statusChild)
 	{
-		// The options container is DIALOG_OPTION static child 1.
-		// All text lives in its dynamic children:
-		//   [0]     = title "Select an option"  (HasListener=false, color=0x800000)
-		//   [1..n]  = clickable options          (HasListener=true)
-		// Unused option slots are hidden or have empty text — always skip them.
-		Widget container = client.getWidget(InterfaceID.DIALOG_OPTION, 1);
-		if (container == null)
+		Widget name =
+			client.getWidget(groupId, nameChild);
+
+		Widget body =
+			client.getWidget(groupId, bodyChild);
+
+		if (!renderableTextWidget(body))
 		{
 			return null;
 		}
 
-		Widget[] dynChildren = container.getDynamicChildren();
-		if (dynChildren == null || dynChildren.length == 0)
+		Widget status =
+			findStatusWidget(
+				groupId,
+				statusChild,
+				null
+			);
+
+		String rawBody = body.getText();
+		String rawName =
+			name != null ? name.getText() : null;
+
+		List<TextSegment> segments =
+			parseSegments(
+				rawBody,
+				color(body.getTextColor())
+			);
+
+		if (segments.isEmpty())
 		{
 			return null;
 		}
 
-		// ---- Capture + camouflage the title (dynamic child 0) ----
-		Widget titleWidget = dynChildren[0];
-		cachedOptionTitleWidget = titleWidget; // preserve ref for reBlankWidgets()
-		String titleRaw = titleWidget.getText();
-		if (titleRaw != null && !titleRaw.isEmpty())
+		String speaker =
+			rawName == null
+				? ""
+				: stripTags(rawName);
+
+		String statusText =
+			status == null ||
+			status.getText() == null
+				? ""
+				: stripTags(status.getText());
+
+		Rectangle bodyBounds = copy(body.getBounds());
+		Rectangle nameBounds =
+			name == null ? null : copy(name.getBounds());
+
+		Rectangle statusBounds =
+			status == null ? null : copy(status.getBounds());
+
+		Color bodyBaseColor =
+			color(body.getTextColor());
+
+		Color nameColor =
+			name == null
+				? new Color(0x800000)
+				: color(name.getTextColor());
+
+		Color statusColor =
+			status == null
+				? new Color(0x0000FF)
+				: color(status.getTextColor());
+
+		String key =
+			type.name() + "|" +
+			speaker + "|" +
+			flattenSegments(segments) + "|" +
+			rectKey(bodyBounds);
+
+		suppressGlyphs(body);
+
+		if (config.replaceNpc() ||
+			config.replacePlayer())
 		{
-			cachedOptionTitle = stripTags(titleRaw);
+			suppressGlyphs(name);
 		}
-		camouflageWidget(titleWidget);
 
-		// ---- Capture + camouflage each option (dynamic children 1..n) ----
-		List<String> freshTexts  = new ArrayList<>();
-		List<Widget> liveWidgets = new ArrayList<>();
-
-		for (int i = 1; i < dynChildren.length; i++)
+		if (config.replaceStatus())
 		{
-			Widget opt = dynChildren[i];
-			if (opt == null || opt.isHidden())
-			{
-				continue;
-			}
-
-			// Always collect as a live widget so the overlay has current bounds
-			liveWidgets.add(opt);
-
-			String optText = opt.getText();
-			if (optText != null && !optText.isEmpty())
-			{
-				freshTexts.add(stripTags(optText));
-			}
-
-			camouflageWidget(opt);
-		}
-
-		if (!freshTexts.isEmpty())
-		{
-			// New real text arrived — update text and widget caches atomically
-			cachedOptionTexts   = freshTexts;
-			cachedOptionWidgets = liveWidgets.toArray(new Widget[0]);
-		}
-		else if (!liveWidgets.isEmpty())
-		{
-			// Options already blank (we blanked them last frame) — update bounds refs only
-			cachedOptionWidgets = liveWidgets.toArray(new Widget[0]);
-		}
-
-		if (cachedOptionTexts.isEmpty())
-		{
-			return null;
+			suppressGlyphs(status);
 		}
 
 		return new DialogueState(
-			DialogueType.OPTION_DIALOGUE,
-			cachedOptionTitle,
+			type,
+			speaker,
+			segments,
 			null,
-			cachedOptionTexts,
-			container,               // textWidget — used for bounds & visibility checks
-			cachedOptionTitleWidget, // nameWidget — re-blanked by reBlankWidgets()
+			statusText,
+			bodyBounds,
+			nameBounds,
 			null,
-			cachedOptionWidgets,     // option dynamic children
-			""                       // no continue widget for option dialogue
+			statusBounds,
+			bodyBaseColor,
+			nameColor,
+			null,
+			null,
+			statusColor,
+			key
 		);
 	}
 
-	private DialogueState buildSpriteState()
+	private DialogueState buildSpriteState(
+		Widget spriteRoot)
 	{
-		Widget spriteRoot = client.getWidget(InterfaceID.DIALOG_SPRITE, 0);
-		Widget textWidget  = client.getWidget(InterfaceID.DIALOG_SPRITE, SPRITE_CHILD_TEXT);
+		Widget body =
+			client.getWidget(
+				InterfaceID.DIALOG_SPRITE,
+				SPRITE_CHILD_TEXT
+			);
 
-		// Continue widget is a DYNAMIC child of the 193.0 container, not a static child.
-		// Confirmed via Widget Inspector: D 193.0[2], HasListener=true, Text="Click here to continue"
-		Widget continueWidget = null;
-		if (spriteRoot != null)
-		{
-			Widget[] dynChildren = spriteRoot.getDynamicChildren();
-			if (dynChildren != null && dynChildren.length > SPRITE_CONTINUE_DYN_INDEX)
-			{
-				continueWidget = dynChildren[SPRITE_CONTINUE_DYN_INDEX];
-			}
-		}
-
-		if (textWidget == null)
+		if (!renderableTextWidget(body))
 		{
 			return null;
 		}
 
-		String raw = textWidget.getText();
-		if (raw != null && !raw.isEmpty())
-		{
-			cachedSpriteBody = parseSegments(raw, Color.BLACK);
-		}
+		Widget status =
+			findStatusWidget(
+				InterfaceID.DIALOG_SPRITE,
+				-1,
+				spriteRoot
+			);
 
-		// Capture continue text
-		if (continueWidget != null)
-		{
-			String rawContinue = continueWidget.getText();
-			if (rawContinue != null && !rawContinue.isEmpty())
-			{
-				cachedSpriteContinue = stripTags(rawContinue);
-			}
-		}
+		List<TextSegment> segments =
+			parseSegments(
+				body.getText(),
+				color(body.getTextColor())
+			);
 
-		blankWidget(textWidget);
-		blankWidget(continueWidget); // setText("") — sprite dialogues don't rely on spacebar
-
-		if (cachedSpriteBody.isEmpty())
+		if (segments.isEmpty())
 		{
 			return null;
+		}
+
+		Rectangle bodyBounds = copy(body.getBounds());
+
+		String statusText =
+			status == null ||
+			status.getText() == null
+				? ""
+				: stripTags(status.getText());
+
+		String key =
+			DialogueType.SPRITE_DIALOGUE.name() +
+			"|" +
+			flattenSegments(segments) +
+			"|" +
+			rectKey(bodyBounds);
+
+		suppressGlyphs(body);
+
+		if (config.replaceStatus())
+		{
+			suppressGlyphs(status);
 		}
 
 		return new DialogueState(
 			DialogueType.SPRITE_DIALOGUE,
+			"",
+			segments,
 			null,
-			cachedSpriteBody,
+			statusText,
+			bodyBounds,
 			null,
-			textWidget,
 			null,
-			continueWidget,
+			status == null
+				? null
+				: copy(status.getBounds()),
+			color(body.getTextColor()),
 			null,
-			cachedSpriteContinue
+			null,
+			null,
+			status == null
+				? new Color(0x0000FF)
+				: color(status.getTextColor()),
+			key
 		);
 	}
 
-	// -------------------------------------------------------------------------
-	// Cache management
-	// -------------------------------------------------------------------------
-
-
-	private void clearCacheFor(DialogueType type)
+	private DialogueState buildOptionState(
+		Widget container)
 	{
-		if (type == null)
+		Widget[] children =
+			container.getDynamicChildren();
+
+		if (children == null ||
+			children.length == 0)
+		{
+			return null;
+		}
+
+		Widget title = children[0];
+
+		String titleText =
+			title == null ||
+			title.getText() == null
+				? ""
+				: stripTags(title.getText());
+
+		Rectangle titleBounds =
+			title == null
+				? null
+				: copy(title.getBounds());
+
+		Color titleColor =
+			title == null
+				? new Color(0x800000)
+				: color(title.getTextColor());
+
+		List<String> options = new ArrayList<>();
+		List<Rectangle> bounds = new ArrayList<>();
+		List<Color> colors = new ArrayList<>();
+		List<Widget> allTextRows = new ArrayList<>();
+
+		Widget waitWidget = null;
+		String waitText = "";
+		Color waitColor = new Color(0x0000FF);
+
+		for (int i = 1; i < children.length; i++)
+		{
+			Widget row = children[i];
+
+			if (!renderableTextWidget(row) ||
+				row.getType() != WidgetType.TEXT)
+			{
+				continue;
+			}
+
+			String raw = row.getText();
+
+			if (raw == null || raw.isEmpty())
+			{
+				continue;
+			}
+
+			String cleaned = stripTags(raw);
+
+			if (cleaned.isEmpty())
+			{
+				continue;
+			}
+
+			allTextRows.add(row);
+
+			if (isWaitPrompt(cleaned))
+			{
+				waitWidget = row;
+				waitText = cleaned;
+				waitColor = color(row.getTextColor());
+				continue;
+			}
+
+			options.add(cleaned);
+			bounds.add(copy(row.getBounds()));
+			colors.add(color(row.getTextColor()));
+		}
+
+		// Jagex can leave stale options in the child array for a fraction of a
+		// second after one row changes to "Please wait...". Suppress the native
+		// font on every row, then render only the real wait state.
+		suppressGlyphs(title);
+
+		for (Widget row : allTextRows)
+		{
+			suppressGlyphs(row);
+		}
+
+		if (waitWidget != null)
+		{
+			return new DialogueState(
+				DialogueType.OPTION_DIALOGUE,
+				"",
+				null,
+				Collections.emptyList(),
+				waitText,
+				null,
+				null,
+				new Rectangle[0],
+				copy(waitWidget.getBounds()),
+				null,
+				null,
+				null,
+				new Color[0],
+				waitColor,
+				DialogueType.OPTION_DIALOGUE.name() +
+					"|WAIT|" + waitText
+			);
+		}
+
+		if (options.isEmpty())
+		{
+			return null;
+		}
+
+		StringBuilder key =
+			new StringBuilder(
+				DialogueType.OPTION_DIALOGUE.name()
+			);
+
+		key.append('|').append(titleText);
+
+		for (String option : options)
+		{
+			key.append('|').append(option);
+		}
+
+		return new DialogueState(
+			DialogueType.OPTION_DIALOGUE,
+			titleText,
+			null,
+			Collections.unmodifiableList(options),
+			"",
+			null,
+			titleBounds,
+			bounds.toArray(new Rectangle[0]),
+			null,
+			null,
+			null,
+			titleColor,
+			colors.toArray(new Color[0]),
+			null,
+			key.toString()
+		);
+	}
+
+	private static boolean isWaitPrompt(String text)
+	{
+		if (text == null)
+		{
+			return false;
+		}
+
+		String normalized =
+			text.trim().toLowerCase(Locale.ROOT);
+
+		return normalized.equals("please wait") ||
+			normalized.equals("please wait...");
+	}
+
+	private void suppressGlyphs(Widget widget)
+	{
+		if (!renderableTextWidget(widget))
 		{
 			return;
 		}
-		switch (type)
-		{
-			case NPC_DIALOGUE:
-				cachedNpcBody     = Collections.emptyList();
-				cachedNpcName     = "";
-				cachedNpcContinue = "";
-				break;
-			case PLAYER_DIALOGUE:
-				cachedPlayerBody     = Collections.emptyList();
-				cachedPlayerName     = "";
-				cachedPlayerContinue = "";
-				break;
-			case OPTION_DIALOGUE:
-				cachedOptionTexts       = Collections.emptyList();
-				cachedOptionWidgets     = new Widget[0];
-				cachedOptionTitle       = "";
-				cachedOptionTitleWidget = null;
-				break;
-			case SPRITE_DIALOGUE:
-				cachedSpriteBody     = Collections.emptyList();
-				cachedSpriteContinue = "";
-				break;
-			default:
-				break;
-		}
-	}
 
-	// -------------------------------------------------------------------------
-	// Widget blanking / camouflage
-	// -------------------------------------------------------------------------
-
-
-	/**
-	 * Saves a widget's original text (for shutdown restoration) then blanks it.
-	 * The original is saved only on the first call per widget so we never
-	 * overwrite a real value with our own empty string.
-	 */
-	private void blankWidget(Widget widget)
-	{
-		if (widget == null)
+		if (suppressedFontIds.containsKey(widget))
 		{
 			return;
 		}
-		String current = widget.getText();
-		if (current == null)
+
+		int before = widget.getFontId();
+
+		if (before < 0)
 		{
 			return;
 		}
-		if (!current.isEmpty() && !savedTexts.containsKey(widget))
-		{
-			savedTexts.put(widget, current);
-		}
-		widget.setText("");
+
+		suppressedFontIds.put(widget, before);
+
+		diagnostics.recordFontMutation(
+			"before-native-render",
+			"SUPPRESS_NATIVE_FONT",
+			widget,
+			before,
+			-1
+		);
+
+		widget.setFontId(-1);
 	}
 
-	/**
-	 * Camouflages an option widget by setting its text colour to the parchment
-	 * background colour ({@link #OPTION_CAMOUFLAGE_COLOR}) rather than blanking
-	 * its text.  This keeps the text content intact so the engine's 1–5 key
-	 * handler can still read it, while making it visually invisible.
-	 * The original colour is saved on the first call so it can be restored on
-	 * shutdown.
-	 */
-	private void camouflageWidget(Widget widget)
+	private Widget findStatusWidget(
+		int groupId,
+		int fallbackChild,
+		Widget explicitRoot)
 	{
-		if (widget == null)
+		Widget fallback =
+			fallbackChild >= 0
+				? client.getWidget(groupId, fallbackChild)
+				: null;
+
+		StatusCandidate best =
+			new StatusCandidate();
+
+		Set<Widget> visited =
+			Collections.newSetFromMap(
+				new IdentityHashMap<>()
+			);
+
+		if (explicitRoot != null)
+		{
+			scanStatus(
+				explicitRoot,
+				0,
+				visited,
+				best
+			);
+		}
+
+		for (int child = 0;
+			child <= MAX_SCAN_CHILD;
+			child++)
+		{
+			Widget widget =
+				client.getWidget(groupId, child);
+
+			scanStatus(
+				widget,
+				0,
+				visited,
+				best
+			);
+		}
+
+		return best.widget != null
+			? best.widget
+			: fallback;
+	}
+
+	private void scanStatus(
+		Widget widget,
+		int depth,
+		Set<Widget> visited,
+		StatusCandidate best)
+	{
+		if (widget == null ||
+			depth > MAX_SCAN_DEPTH ||
+			!visited.add(widget))
 		{
 			return;
 		}
-		if (!savedColors.containsKey(widget))
+
+		int score = scoreStatusWidget(widget);
+
+		if (score > best.score)
 		{
-			savedColors.put(widget, widget.getTextColor());
+			best.score = score;
+			best.widget = widget;
 		}
-		widget.setTextColor(OPTION_CAMOUFLAGE_COLOR);
+
+		scanStatusChildren(
+			widget.getStaticChildren(),
+			depth,
+			visited,
+			best
+		);
+
+		scanStatusChildren(
+			widget.getDynamicChildren(),
+			depth,
+			visited,
+			best
+		);
+
+		scanStatusChildren(
+			widget.getNestedChildren(),
+			depth,
+			visited,
+			best
+		);
 	}
 
-	// -------------------------------------------------------------------------
-	// Shared helpers
-	// -------------------------------------------------------------------------
-
-	private static boolean isVisible(Widget w)
+	private void scanStatusChildren(
+		Widget[] children,
+		int depth,
+		Set<Widget> visited,
+		StatusCandidate best)
 	{
-		return w != null && !w.isHidden();
+		if (children == null)
+		{
+			return;
+		}
+
+		for (Widget child : children)
+		{
+			scanStatus(
+				child,
+				depth + 1,
+				visited,
+				best
+			);
+		}
 	}
 
-	/**
-	 * Strips all inline markup tags ({@code <tag>}) from a raw widget text string.
-	 * Package-private so {@link BetterDialogueOverlay} can strip live widget text
-	 * captured during render().
-	 */
+	private int scoreStatusWidget(Widget widget)
+	{
+		if (!renderableTextWidget(widget))
+		{
+			return 0;
+		}
+
+		String raw = widget.getText();
+
+		if (raw == null || raw.isEmpty())
+		{
+			return 0;
+		}
+
+		String text =
+			stripTags(raw)
+				.toLowerCase(Locale.ROOT);
+
+		int score = 0;
+
+		if (text.contains("click here to continue"))
+		{
+			score = 120;
+		}
+		else if (text.contains("click to continue"))
+		{
+			score = 118;
+		}
+		else if (text.contains("press space") &&
+			text.contains("continue"))
+		{
+			score = 116;
+		}
+		else if (text.contains("spacebar") &&
+			text.contains("continue"))
+		{
+			score = 114;
+		}
+		else if (text.contains("please wait"))
+		{
+			score = 112;
+		}
+		else if (text.equals("continue"))
+		{
+			score = 100;
+		}
+		else if (widget.hasListener() &&
+			widget.getHeight() <= 24)
+		{
+			// Future-proof fallback for other small status strings.
+			score = 50;
+		}
+
+		if (score > 0 && widget.hasListener())
+		{
+			score += 5;
+		}
+
+		return score;
+	}
+
+	private static boolean renderableTextWidget(
+		Widget widget)
+	{
+		return widget != null &&
+			!widget.isHidden();
+	}
+
 	static String stripTags(String text)
 	{
 		if (text == null)
 		{
 			return "";
 		}
-		return TAG_STRIP.matcher(text)
-			.replaceAll("")
+
+		String cleaned = text
 			.replace("<br>", " ")
+			.replace("<lt>", "\uE000")
+			.replace("<gt>", "\uE001");
+
+		cleaned =
+			TAG_STRIP.matcher(cleaned).replaceAll("");
+
+		return cleaned
+			.replace("\uE000", "<")
+			.replace("\uE001", ">")
+			.replaceAll("\\s{2,}", " ")
 			.trim();
 	}
 
-	/**
-	 * Parses a raw widget text string (which may contain {@code <col=RRGGBB>}
-	 * and {@code <br>} tags) into a list of colour-annotated {@link TextSegment}s.
-	 *
-	 * @param raw          raw text from {@link Widget#getText()}
-	 * @param defaultColor colour to use when no {@code <col>} tag is active
-	 * @return ordered list of styled text segments (never {@code null})
-	 */
-	public List<TextSegment> parseSegments(String raw, Color defaultColor)
+	public List<TextSegment> parseSegments(
+		String raw,
+		Color defaultColor)
 	{
-		List<TextSegment> segments = new ArrayList<>();
+		List<TextSegment> segments =
+			new ArrayList<>();
+
 		if (raw == null || raw.isEmpty())
 		{
 			return segments;
 		}
 
-		// Replace <br> with a SPACE, not \n.
-		// The game bakes <br> tags into widget text at Quill 8 character-width boundaries.
-		// Those break-points are meaningless for any other font.  Collapsing them to spaces
-		// lets FontRenderer.drawWrappedText() re-wrap the text from scratch using the
-		// configured TrueType font's own FontMetrics — producing correct line breaks.
 		String text = raw
-			.replace("<br>", " ")
-			.replace("<lt>", "<")
-			.replace("<gt>", ">")
-			.replaceAll("\\s{2,}", " ") // collapse double-spaces from adjacent <br>s
+			.replace("<br>", "\n")
+			.replace("<lt>", "\uE000")
+			.replace("<gt>", "\uE001")
+			.replaceAll("[\\t ]{2,}", " ")
 			.trim();
 
 		Color currentColor = defaultColor;
 		int pos = 0;
-		int len = text.length();
 
-		while (pos < len)
+		while (pos < text.length())
 		{
-			int tagStart = text.indexOf('<', pos);
+			int tagStart =
+				text.indexOf('<', pos);
+
 			if (tagStart == -1)
 			{
-				appendSegment(segments, text.substring(pos), currentColor);
+				appendSegment(
+					segments,
+					restoreAngles(
+						text.substring(pos)
+					),
+					currentColor
+				);
 				break;
 			}
 
 			if (tagStart > pos)
 			{
-				appendSegment(segments, text.substring(pos, tagStart), currentColor);
+				appendSegment(
+					segments,
+					restoreAngles(
+						text.substring(
+							pos,
+							tagStart
+						)
+					),
+					currentColor
+				);
 			}
 
-			int tagEnd = text.indexOf('>', tagStart);
+			int tagEnd =
+				text.indexOf('>', tagStart);
+
 			if (tagEnd == -1)
 			{
-				appendSegment(segments, text.substring(tagStart), currentColor);
+				appendSegment(
+					segments,
+					restoreAngles(
+						text.substring(tagStart)
+					),
+					currentColor
+				);
 				break;
 			}
 
-			String tagContent = text.substring(tagStart + 1, tagEnd);
-			if (tagContent.startsWith("col="))
+			String tag =
+				text.substring(
+					tagStart + 1,
+					tagEnd
+				);
+
+			if (tag.startsWith("col="))
 			{
 				try
 				{
-					currentColor = new Color(Integer.parseInt(tagContent.substring(4), 16));
+					currentColor =
+						new Color(
+							Integer.parseInt(
+								tag.substring(4),
+								16
+							)
+						);
 				}
 				catch (NumberFormatException ignored)
 				{
 				}
 			}
-			else if (tagContent.equals("/col"))
+			else if ("/col".equals(tag))
 			{
 				currentColor = defaultColor;
 			}
-			// All other tags (<shad>, <str>, <u>, etc.) are silently ignored
 
+			// Intentionally ignore style tags. Weight/italic come from
+			// Dialogue Fonts+ settings, not game markup.
 			pos = tagEnd + 1;
 		}
 
 		return segments;
 	}
 
-	private static void appendSegment(List<TextSegment> list, String text, Color color)
+	private static void appendSegment(
+		List<TextSegment> segments,
+		String text,
+		Color color)
 	{
-		if (!text.isEmpty())
+		if (text != null && !text.isEmpty())
 		{
-			list.add(new TextSegment(text, color));
+			segments.add(
+				new TextSegment(text, color)
+			);
 		}
+	}
+
+	private static String restoreAngles(String text)
+	{
+		return text
+			.replace("\uE000", "<")
+			.replace("\uE001", ">");
+	}
+
+	private static String flattenSegments(
+		List<TextSegment> segments)
+	{
+		StringBuilder out = new StringBuilder();
+
+		for (TextSegment segment : segments)
+		{
+			out.append(segment.getText());
+		}
+
+		return out.toString();
+	}
+
+	private static boolean isVisible(Widget widget)
+	{
+		return widget != null &&
+			!widget.isHidden();
+	}
+
+	private static Color color(int rgb)
+	{
+		return new Color(rgb & 0xFFFFFF);
+	}
+
+	private static Rectangle copy(Rectangle rectangle)
+	{
+		return rectangle == null
+			? null
+			: new Rectangle(rectangle);
+	}
+
+	private static String rectKey(Rectangle rectangle)
+	{
+		if (rectangle == null)
+		{
+			return "null";
+		}
+
+		return rectangle.x + "," +
+			rectangle.y + "," +
+			rectangle.width + "," +
+			rectangle.height;
+	}
+
+	private static final class StatusCandidate
+	{
+		private Widget widget;
+		private int score;
 	}
 }

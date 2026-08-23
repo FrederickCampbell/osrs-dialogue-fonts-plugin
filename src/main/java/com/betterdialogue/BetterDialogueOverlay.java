@@ -22,66 +22,45 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.betterdialogue;
 
+import java.awt.Color;
+import java.awt.Dimension;
+import java.awt.Graphics2D;
+import java.awt.Polygon;
+import java.awt.Rectangle;
+import java.util.ArrayList;
+import java.util.List;
+import javax.inject.Inject;
+import javax.inject.Singleton;
 import net.runelite.api.Client;
 import net.runelite.api.Point;
-import net.runelite.api.widgets.Widget;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.OverlayPriority;
 
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.Font;
-import java.awt.FontMetrics;
-import java.awt.Graphics2D;
-import java.awt.Rectangle;
-import java.util.List;
-
-/**
- * Paints replacement text on top of the OSRS dialogue boxes using
- * {@link Graphics2D}.
- *
- * <p>The overlay runs on {@link OverlayLayer#ABOVE_WIDGETS} so it is drawn
- * after all widget rendering, ensuring our text is always on top. It reads
- * the {@link DialogueState} snapshot set by {@link BetterDialoguePlugin} each
- * game tick and draws word-wrapped, colour-tagged replacement text using the
- * configured system font via {@link FontRenderer}.
- *
- * <p>No background fill is painted — {@code setText("")} already blanks the
- * original bitmap text, so the game's native parchment texture shows through
- * naturally underneath the replacement text.
- */
 @Singleton
 public class BetterDialogueOverlay extends Overlay
 {
-	/**
-	 * Colour of the "Select an option" title in the option dialogue.
-	 * Confirmed via Widget Inspector: TextColor = 0x800000 (dark red).
-	 */
-	private static final Color OPTION_TITLE_COLOR = new Color(0x80, 0x00, 0x00);
+	private static final Color VANILLA_BODY =
+		new Color(0x000000);
 
-	/**
-	 * Colour used to render the NPC/player name above the body text.
-	 * Matches vanilla OSRS: Widget Inspector reports TextColor = 0x000080 (dark blue).
-	 */
-	private static final Color NAME_COLOR = new Color(0x00, 0x00, 0x80);
+	private static final Color VANILLA_SPEAKER =
+		new Color(0x800000);
 
-	/**
-	 * Parchment background colour of the OSRS dialogue box.
-	 * Used to fill the continue-widget area before painting our replacement text,
-	 * overwriting any white "Please wait..." the engine rendered that frame
-	 * (which cannot be prevented due to widget rendering running before overlays).
-	 * Value confirmed via Widget Inspector: {@code #D6CCAF}.
-	 */
-	private static final Color PARCHMENT_COLOR = new Color(0xD6, 0xCC, 0xAF);
+	private static final Color VANILLA_STATUS =
+		new Color(0x0000FF);
 
-	/** Vertical padding between the widget top and the first text baseline. */
-	private static final int V_PADDING = 4;
+	private static final Color VANILLA_OPTION =
+		new Color(0x000000);
+
+	private static final Color VANILLA_HOVER =
+		Color.WHITE;
+
+	private static final int SCROLLBAR_WIDTH = 7;
+	private static final int SCROLLBAR_GAP = 4;
 
 	@Inject
 	private Client client;
@@ -92,7 +71,15 @@ public class BetterDialogueOverlay extends Overlay
 	@Inject
 	private FontRenderer fontRenderer;
 
-	/** Updated each game tick by the plugin. Volatile for cross-thread visibility. */
+	@Inject
+	private DialogueWidgetManager widgetManager;
+
+	@Inject
+	private DialogueScrollController scrollController;
+
+	@Inject
+	private OptionSelectionFeedback optionSelectionFeedback;
+
 	private volatile DialogueState currentState;
 
 	@Inject
@@ -103,401 +90,767 @@ public class BetterDialogueOverlay extends Overlay
 		setPriority(OverlayPriority.HIGH);
 	}
 
-	/** Called by the plugin once per game tick to update the displayed state. */
 	public void setState(DialogueState state)
 	{
-		this.currentState = state;
+		currentState = state;
 	}
-
-	// -------------------------------------------------------------------------
-	// Overlay#render
-	// -------------------------------------------------------------------------
 
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
 		DialogueState state = currentState;
+
+		fontRenderer.applyRenderingMode(graphics);
+
+		// Put the confirmation wash behind the current text so the option glyphs
+		// remain perfectly crisp.
+		drawSelectionFeedback(graphics);
+
 		if (state == null)
 		{
+			scrollController.reset();
+			optionSelectionFeedback.clearOptions();
 			return null;
 		}
 
-		// Belt-and-suspenders: re-blank every widget in the current state right
-		// here, before we paint.  onClientTick already does this once per frame,
-		// but render() fires in the same frame directly before pixels are written,
-		// so any text the engine reset between the ClientTick and this render call
-		// is caught here and cleared before it can appear on screen.
-		reBlankWidgets(state);
-
-		fontRenderer.applyRenderingHints(graphics);
+		if (state.getType() != DialogueType.OPTION_DIALOGUE)
+		{
+			optionSelectionFeedback.clearOptions();
+		}
 
 		switch (state.getType())
 		{
 			case NPC_DIALOGUE:
-				if (config.replaceNpc())
-				{
-					renderNpcDialogue(graphics, state);
-				}
+				renderCharacterDialogue(graphics, state);
 				break;
 
 			case PLAYER_DIALOGUE:
-				if (config.replacePlayer())
-				{
-					renderPlayerDialogue(graphics, state);
-				}
+				renderCharacterDialogue(graphics, state);
 				break;
 
 			case OPTION_DIALOGUE:
-				if (config.replaceOptions())
-				{
-					renderOptionDialogue(graphics, state);
-				}
+				renderOptions(graphics, state);
 				break;
 
 			case SPRITE_DIALOGUE:
-				if (config.replaceSprite())
-				{
-					renderSpriteDialogue(graphics, state);
-				}
+				renderSpriteDialogue(graphics, state);
 				break;
 
 			default:
 				break;
 		}
 
-		return null; // DYNAMIC overlays return null
+		// Native font IDs intentionally remain -1 through the rest of this frame.
+		// The next high-priority BeforeRender restores them before plugin logic.
+		return null;
 	}
 
-	// -------------------------------------------------------------------------
-	// Per-type renderers
-	// -------------------------------------------------------------------------
-
-	private void renderNpcDialogue(Graphics2D g, DialogueState state)
+	private void renderCharacterDialogue(
+		Graphics2D g,
+		DialogueState state)
 	{
-		Widget textWidget = state.getTextWidget();
-		if (textWidget == null || textWidget.isHidden())
+		if (state.getSpeakerBounds() != null &&
+			state.getSpeakerOrTitle() != null &&
+			!state.getSpeakerOrTitle().isEmpty())
 		{
-			return;
+			fontRenderer.drawSingleLine(
+				g,
+				state.getSpeakerOrTitle(),
+				state.getSpeakerBounds(),
+				resolveSpeakerColor(
+					state.getSpeakerColor()
+				),
+				config.speakerStyle()
+			);
 		}
 
-		Rectangle bounds = textWidget.getBounds();
-		if (bounds == null || bounds.width <= 0)
-		{
-			return;
-		}
-
-		// ---- Name ----
-		Widget nameWidget = state.getNameWidget();
-		if (nameWidget != null && !nameWidget.isHidden() && state.getNpcName() != null && !state.getNpcName().isEmpty())
-		{
-			Rectangle nameBounds = nameWidget.getBounds();
-			if (nameBounds != null && nameBounds.width > 0)
-			{
-				fontRenderer.drawCenteredString(
-					g, state.getNpcName(), nameBounds,
-					centreY(g, nameBounds, fontRenderer.getFont()),
-					NAME_COLOR);
-			}
-		}
-
-		// ---- Body ----
-		fontRenderer.drawWrappedText(g, state.getBodySegments(), bounds, bounds.y + V_PADDING);
-
-		// ---- Continue ("Click here to continue" / "Please wait...") ----
-		// Pass the live static-child widget directly — static children are always the same object.
-		renderContinueText(g, state.getContinueWidget(), state.getContinueText());
+		renderBodyAndStatus(g, state);
 	}
 
-	private void renderPlayerDialogue(Graphics2D g, DialogueState state)
+	private void renderSpriteDialogue(
+		Graphics2D g,
+		DialogueState state)
 	{
-		Widget textWidget = state.getTextWidget();
-		if (textWidget == null || textWidget.isHidden())
-		{
-			return;
-		}
-
-		Rectangle bounds = textWidget.getBounds();
-		if (bounds == null || bounds.width <= 0)
-		{
-			return;
-		}
-
-		// ---- Name ----
-		Widget nameWidget = state.getNameWidget();
-		if (nameWidget != null && !nameWidget.isHidden() && state.getNpcName() != null && !state.getNpcName().isEmpty())
-		{
-			Rectangle nameBounds = nameWidget.getBounds();
-			if (nameBounds != null && nameBounds.width > 0)
-			{
-				fontRenderer.drawCenteredString(
-					g, state.getNpcName(), nameBounds,
-					centreY(g, nameBounds, fontRenderer.getFont()),
-					NAME_COLOR);
-			}
-		}
-
-		// ---- Body ----
-		fontRenderer.drawWrappedText(g, state.getBodySegments(), bounds, bounds.y + V_PADDING);
-
-		// ---- Continue ----
-		renderContinueText(g, state.getContinueWidget(), state.getContinueText());
+		renderBodyAndStatus(g, state);
 	}
 
-	private void renderOptionDialogue(Graphics2D g, DialogueState state)
+	private void renderBodyAndStatus(
+		Graphics2D g,
+		DialogueState state)
 	{
-		Widget container = state.getTextWidget();
-		if (container == null || container.isHidden())
+		Rectangle body =
+			state.getBodyBounds();
+
+		if (body != null &&
+			state.getBodySegments() != null &&
+			!state.getBodySegments().isEmpty())
 		{
-			return;
-		}
+			List<TextSegment> resolved =
+				resolveBodySegments(state);
 
-		Rectangle containerBounds = container.getBounds();
-		if (containerBounds == null || containerBounds.width <= 0)
-		{
-			return;
-		}
+			int fullWidth =
+				Math.max(1, body.width - 8);
 
-		// No fillRect — option text is camouflaged to the parchment colour so the
-		// engine key handler (1–5) can still read it.  The overlay text paints on
-		// top; ghost text in parchment-on-parchment is nearly invisible underneath.
+			FontRenderer.WrappedLayout layout =
+				fontRenderer.layout(
+					g,
+					resolved,
+					fullWidth,
+					config.bodyStyle()
+				);
 
-		// Use the smaller option font — each row is only 16 px tall
-		Font optionFont = fontRenderer.getOptionFont();
+			boolean overflow =
+				layout.getContentHeight() >
+					Math.max(1, body.height - 4);
 
-		// ---- Title ("Select an option") ----
-		Widget titleWidget = state.getNameWidget();
-		if (titleWidget != null && !titleWidget.isHidden())
-		{
-			Rectangle titleBounds = titleWidget.getBounds();
-			if (titleBounds != null && titleBounds.width > 0)
+			Rectangle textViewport =
+				new Rectangle(body);
+
+			if (overflow &&
+				config.overflowScrollbar())
 			{
-				fontRenderer.drawCenteredString(
-					g, state.getNpcName(), titleBounds,
-					centreY(g, titleBounds, optionFont),
-					OPTION_TITLE_COLOR, optionFont);
-			}
-		}
+				textViewport.width =
+					Math.max(
+						1,
+						textViewport.width -
+							SCROLLBAR_WIDTH -
+							SCROLLBAR_GAP -
+							4
+					);
 
-		// ---- Option rows ----
-		Widget[] optionWidgets = state.getOptionWidgets();
-		List<String> options = state.getOptions();
+				layout =
+					fontRenderer.layout(
+						g,
+						resolved,
+						Math.max(
+							1,
+							textViewport.width - 8
+						),
+						config.bodyStyle()
+					);
 
-		if (optionWidgets == null || options == null)
-		{
-			return;
-		}
-
-		Point mouse = client.getMouseCanvasPosition();
-
-		for (int i = 0; i < optionWidgets.length && i < options.size(); i++)
-		{
-			Widget optWidget = optionWidgets[i];
-			if (optWidget == null || optWidget.isHidden())
-			{
-				continue;
+				overflow =
+					layout.getContentHeight() >
+						Math.max(
+							1,
+							body.height - 4
+						);
 			}
 
-			Rectangle optBounds = optWidget.getBounds();
-			if (optBounds == null || optBounds.width <= 0)
+			scrollController.updateLayout(
+				state.getDialogueKey(),
+				body,
+				state.getStatusBounds(),
+				state.getStatusText(),
+				layout.getContentHeight(),
+				layout.getLineHeight()
+			);
+
+			fontRenderer.drawWrapped(
+				g,
+				layout,
+				textViewport,
+				scrollController.getScrollOffset(),
+				!overflow
+			);
+
+			if (overflow &&
+				config.overflowScrollbar())
 			{
-				continue;
+				drawScrollbar(
+					g,
+					body
+				);
 			}
-
-			boolean hovered = mouse != null
-				&& optBounds.contains(mouse.getX(), mouse.getY());
-			Color textColor = hovered ? Color.WHITE : Color.BLACK;
-
-			fontRenderer.drawCenteredString(
-				g, options.get(i), optBounds,
-				centreY(g, optBounds, optionFont),
-				textColor, optionFont);
-		}
-	}
-
-	/**
-	 * Computes the top-of-line y coordinate that vertically centres text
-	 * (at the given font) within {@code bounds}.
-	 */
-	private static int centreY(Graphics2D g, Rectangle bounds, Font font)
-	{
-		FontMetrics fm = g.getFontMetrics(font);
-		return bounds.y + (bounds.height - fm.getHeight()) / 2;
-	}
-
-	private void renderSpriteDialogue(Graphics2D g, DialogueState state)
-	{
-		Widget textWidget = state.getTextWidget();
-		if (textWidget == null || textWidget.isHidden())
-		{
-			return;
-		}
-
-		Rectangle bounds = textWidget.getBounds();
-		if (bounds == null || bounds.width <= 0)
-		{
-			return;
-		}
-
-		fontRenderer.drawWrappedText(g, state.getBodySegments(), bounds, bounds.y + V_PADDING);
-
-		// ---- Continue ----
-		// Re-fetch the live dynamic child every frame — the engine may create a new Widget
-		// object when it writes "Please wait...", making the stale state reference stale.
-		// Double-blank here (render-time) in addition to the tick-handler blank so the new
-		// object is guaranteed empty before the engine renders it this frame.
-		Widget spriteRoot = client.getWidget(net.runelite.api.widgets.InterfaceID.DIALOG_SPRITE, 0);
-		Widget liveContinue = null;
-		if (spriteRoot != null)
-		{
-			Widget[] dyn = spriteRoot.getDynamicChildren();
-			if (dyn != null && dyn.length > DialogueWidgetManager.SPRITE_CONTINUE_DYN_INDEX)
+			else
 			{
-				liveContinue = dyn[DialogueWidgetManager.SPRITE_CONTINUE_DYN_INDEX];
-			}
-		}
-		if (liveContinue != null)
-		{
-			safeBlank(liveContinue); // double-blank: closes the tick→render timing gap
-		}
-		renderContinueText(g, liveContinue != null ? liveContinue : state.getContinueWidget(),
-			state.getContinueText());
-	}
-
-	/**
-	 * Renders the continue/wait text centred over {@code widget}.
-	 *
-	 * <p>NPC/player continue widgets are camouflaged (colour set to parchment) by
-	 * {@code reBlankWidgets()} so the engine spacebar handler can still read their text.
-	 * Sprite continue widgets are blanked ({@code setText("")}); sprite dialogues do not
-	 * use spacebar, so blanking is safe and produces no ghost artefacts.
-	 *
-	 * <p>Live widget text is preferred when available (NPC/player — text preserved by
-	 * camouflage); falls back to the tick-handler cache ({@code fallbackText}) when the
-	 * widget is blank (sprite) or when the cache is ahead of the live state.
-	 *
-	 * @param widget       live continue widget; may be {@code null}
-	 * @param fallbackText cached continue text from the last tick; used when widget text is empty
-	 */
-	private void renderContinueText(Graphics2D g, Widget widget, String fallbackText)
-	{
-		if (widget == null)
-		{
-			return;
-		}
-
-		// Prefer fresh live text (still present for NPC/player because camouflage preserves it).
-		// For sprite the text is already blank, so we fall through to the cache.
-		String liveText = widget.getText();
-		String text = (liveText != null && !liveText.isEmpty())
-			? DialogueWidgetManager.stripTags(liveText)
-			: fallbackText;
-
-		if (text == null || text.isEmpty())
-		{
-			return;
-		}
-
-		Rectangle cb = widget.getBounds();
-		if (cb == null || cb.width <= 0)
-		{
-			return;
-		}
-
-		Font font = fontRenderer.getFont();
-		g.setFont(font);
-		FontMetrics fm = g.getFontMetrics(font);
-
-		int textX = cb.x + (cb.width  - fm.stringWidth(text)) / 2;
-		int textY = cb.y + (cb.height - fm.getHeight())        / 2;
-
-		g.setColor(NAME_COLOR);
-		g.drawString(text, textX, textY + fm.getAscent());
-	}
-
-	// -------------------------------------------------------------------------
-	// Utility
-	// -------------------------------------------------------------------------
-
-	/**
-	 * Re-blanks all text widgets referenced by {@code state}.
-	 *
-	 * <p>The engine can reset a widget's text between the {@code onClientTick}
-	 * that built the state and the {@code render()} call that paints our
-	 * replacement — for example on the very first frame a dialogue opens.
-	 * Calling this at the top of every render() ensures the original bitmap
-	 * text is never visible, regardless of engine timing.
-	 *
-	 * <p>We only blank non-empty text so we don't make redundant JNI/C++ calls
-	 * on every frame once the widget is already empty.
-	 */
-	private void reBlankWidgets(DialogueState state)
-	{
-		// The container widget for option dialogue has no text — safeBlank is a no-op.
-		safeBlank(state.getTextWidget());
-
-		if (state.getType() == DialogueType.OPTION_DIALOGUE)
-		{
-			// Option widgets are camouflaged (text preserved) so the engine
-			// key handler (1–5) can still read their content.
-			// Re-apply the camouflage colour each frame in case the engine resets it.
-			safeCamouflage(state.getNameWidget());
-			Widget[] optWidgets = state.getOptionWidgets();
-			if (optWidgets != null)
-			{
-				for (Widget opt : optWidgets)
-				{
-					safeCamouflage(opt);
-				}
+				scrollController.updateScrollbar(
+					null,
+					null
+				);
 			}
 		}
 		else
 		{
-			safeBlank(state.getNameWidget());
-			// Sprite continue is blanked (setText); NPC/player continue is camouflaged so spacebar still fires.
-			if (state.getType() == DialogueType.SPRITE_DIALOGUE)
+			scrollController.reset();
+		}
+
+		if (config.replaceStatus() &&
+			state.getStatusBounds() != null &&
+			state.getStatusText() != null &&
+			!state.getStatusText().isEmpty())
+		{
+			fontRenderer.drawSingleLine(
+				g,
+				state.getStatusText(),
+				state.getStatusBounds(),
+				resolveStatusColor(
+					state.getStatusColor()
+				),
+				config.statusStyle()
+			);
+		}
+	}
+
+	private void renderOptions(
+		Graphics2D g,
+		DialogueState state)
+	{
+		scrollController.reset();
+
+		if (state.getStatusBounds() != null &&
+			state.getStatusText() != null &&
+			!state.getStatusText().isEmpty())
+		{
+			optionSelectionFeedback.clearOptions();
+
+			fontRenderer.drawSingleLine(
+				g,
+				state.getStatusText(),
+				state.getStatusBounds(),
+				resolveStatusColor(
+					state.getStatusColor()
+				),
+				config.statusStyle()
+			);
+			return;
+		}
+
+		if (state.getSpeakerBounds() != null &&
+			state.getSpeakerOrTitle() != null &&
+			!state.getSpeakerOrTitle().isEmpty())
+		{
+			fontRenderer.drawSingleLine(
+				g,
+				state.getSpeakerOrTitle(),
+				state.getSpeakerBounds(),
+				resolveSpeakerColor(
+					state.getOptionTitleColor()
+				),
+				config.speakerStyle()
+			);
+		}
+
+		List<String> options = state.getOptions();
+		Rectangle[] bounds = state.getOptionBounds();
+		Color[] colors = state.getOptionColors();
+
+		optionSelectionFeedback.updateOptions(
+			bounds,
+			colors
+		);
+
+		if (options == null || bounds == null)
+		{
+			return;
+		}
+
+		Point mouse =
+			client.getMouseCanvasPosition();
+
+		int count =
+			Math.min(
+				options.size(),
+				bounds.length
+			);
+
+		for (int i = 0; i < count; i++)
+		{
+			Rectangle row = bounds[i];
+
+			if (row == null)
 			{
-				safeBlank(state.getContinueWidget());
+				continue;
+			}
+
+			boolean hovered =
+				mouse != null &&
+				row.contains(
+					mouse.getX(),
+					mouse.getY()
+				);
+
+			Color nativeColor =
+				colors != null &&
+				i < colors.length &&
+				colors[i] != null
+					? colors[i]
+					: VANILLA_OPTION;
+
+			Color color;
+
+			boolean externallyStyled =
+				isExternallyStyledOption(
+					options.get(i),
+					nativeColor
+				);
+
+			if (hovered &&
+				!(config.respectExternalColors() &&
+					externallyStyled))
+			{
+				color =
+					hasOverride(
+						config.optionHoverColor()
+					)
+						? config.optionHoverColor()
+						: VANILLA_HOVER;
 			}
 			else
 			{
-				safeCamouflage(state.getContinueWidget());
+				color =
+					resolveOptionColor(
+						options.get(i),
+						nativeColor
+					);
 			}
-			Widget[] optWidgets = state.getOptionWidgets();
-			if (optWidgets != null)
+
+			fontRenderer.drawSingleLine(
+				g,
+				options.get(i),
+				row,
+				color,
+				config.optionStyle()
+			);
+		}
+	}
+
+
+	private void drawSelectionFeedback(Graphics2D g)
+	{
+		if (!config.optionSelectionFeedback() ||
+			!optionSelectionFeedback.isFlashing())
+		{
+			return;
+		}
+
+		Rectangle row =
+			optionSelectionFeedback.getFlashBounds();
+
+		if (row == null)
+		{
+			return;
+		}
+
+		// Short, native-ish acknowledgement: warm parchment/gold wash,
+		// strong brown border, and a tiny left-side chevron.
+		Color fill =
+			new Color(0xFF, 0xD7, 0x7A, 72);
+
+		Color edge =
+			new Color(0x61, 0x43, 0x20, 230);
+
+		Color brightEdge =
+			new Color(0xF0, 0xD0, 0x82, 235);
+
+		int x = row.x + 2;
+		int y = row.y + 1;
+		int w = Math.max(1, row.width - 4);
+		int h = Math.max(1, row.height - 2);
+
+		g.setColor(fill);
+		g.fillRoundRect(x, y, w, h, 5, 5);
+
+		g.setColor(edge);
+		g.drawRoundRect(x, y, w - 1, h - 1, 5, 5);
+
+		g.setColor(brightEdge);
+		g.drawLine(
+			x + 1,
+			y + 1,
+			x + w - 3,
+			y + 1
+		);
+
+		int cy = row.y + row.height / 2;
+		Polygon chevron = new Polygon();
+		chevron.addPoint(row.x + 7, cy - 4);
+		chevron.addPoint(row.x + 12, cy);
+		chevron.addPoint(row.x + 7, cy + 4);
+
+		g.setColor(edge);
+		g.fillPolygon(chevron);
+	}
+
+	private void drawScrollbar(
+		Graphics2D g,
+		Rectangle body)
+	{
+		int maxScroll =
+			scrollController.getMaxScroll();
+
+		if (maxScroll <= 0)
+		{
+			scrollController.updateScrollbar(
+				null,
+				null
+			);
+			return;
+		}
+
+		int x =
+			body.x +
+			body.width -
+			SCROLLBAR_WIDTH -
+			1;
+
+		int arrowH = 7;
+
+		Rectangle track =
+			new Rectangle(
+				x,
+				body.y + arrowH + 1,
+				SCROLLBAR_WIDTH,
+				Math.max(
+					8,
+					body.height -
+						(arrowH * 2) -
+						2
+				)
+			);
+
+		int viewport =
+			Math.max(1, body.height);
+
+		int content =
+			viewport + maxScroll;
+
+		int thumbH =
+			Math.max(
+				10,
+				(int) Math.round(
+					track.height *
+						(viewport / (double) content)
+				)
+			);
+
+		thumbH =
+			Math.min(
+				track.height,
+				thumbH
+			);
+
+		int travel =
+			Math.max(
+				0,
+				track.height - thumbH
+			);
+
+		int thumbY =
+			track.y +
+			(maxScroll == 0
+				? 0
+				: (int) Math.round(
+					travel *
+					(scrollController.getScrollOffset() /
+						(double) maxScroll)
+				));
+
+		Rectangle thumb =
+			new Rectangle(
+				track.x,
+				thumbY,
+				track.width,
+				thumbH
+			);
+
+		// OSRS-ish parchment/dark-brown micro scrollbar; deliberately subtle.
+		Color trackColor =
+			new Color(0x4A, 0x3C, 0x26, 120);
+
+		Color thumbColor =
+			new Color(0x8E, 0x77, 0x4C, 210);
+
+		Color edgeColor =
+			new Color(0x2F, 0x26, 0x18, 220);
+
+		g.setColor(trackColor);
+		g.fillRect(
+			track.x,
+			track.y,
+			track.width,
+			track.height
+		);
+
+		g.setColor(edgeColor);
+		g.drawRect(
+			track.x,
+			track.y,
+			track.width - 1,
+			track.height - 1
+		);
+
+		g.setColor(thumbColor);
+		g.fillRect(
+			thumb.x + 1,
+			thumb.y + 1,
+			Math.max(1, thumb.width - 2),
+			Math.max(1, thumb.height - 2)
+		);
+
+		g.setColor(edgeColor);
+		g.drawRect(
+			thumb.x,
+			thumb.y,
+			thumb.width - 1,
+			thumb.height - 1
+		);
+
+		drawArrow(
+			g,
+			x,
+			body.y,
+			SCROLLBAR_WIDTH,
+			arrowH,
+			true,
+			edgeColor
+		);
+
+		drawArrow(
+			g,
+			x,
+			body.y + body.height - arrowH,
+			SCROLLBAR_WIDTH,
+			arrowH,
+			false,
+			edgeColor
+		);
+
+		scrollController.updateScrollbar(
+			track,
+			thumb
+		);
+	}
+
+	private static void drawArrow(
+		Graphics2D g,
+		int x,
+		int y,
+		int width,
+		int height,
+		boolean up,
+		Color color)
+	{
+		int midX = x + width / 2;
+
+		Polygon triangle = new Polygon();
+
+		if (up)
+		{
+			triangle.addPoint(midX, y + 1);
+			triangle.addPoint(x + 1, y + height - 1);
+			triangle.addPoint(
+				x + width - 2,
+				y + height - 1
+			);
+		}
+		else
+		{
+			triangle.addPoint(
+				x + 1,
+				y + 1
+			);
+			triangle.addPoint(
+				x + width - 2,
+				y + 1
+			);
+			triangle.addPoint(
+				midX,
+				y + height - 1
+			);
+		}
+
+		g.setColor(color);
+		g.fillPolygon(triangle);
+	}
+
+	private List<TextSegment> resolveBodySegments(
+		DialogueState state)
+	{
+		List<TextSegment> resolved =
+			new ArrayList<>();
+
+		Color base =
+			state.getBodyBaseColor() != null
+				? state.getBodyBaseColor()
+				: VANILLA_BODY;
+
+		for (TextSegment segment :
+			state.getBodySegments())
+		{
+			Color nativeColor =
+				segment.getColor() != null
+					? segment.getColor()
+					: base;
+
+			Color chosen =
+				resolveBodyColor(
+					nativeColor,
+					base
+				);
+
+			resolved.add(
+				new TextSegment(
+					segment.getText(),
+					chosen
+				)
+			);
+		}
+
+		return resolved;
+	}
+
+	private Color resolveBodyColor(
+		Color nativeColor,
+		Color baseColor)
+	{
+		Color custom = config.bodyColor();
+
+		if (!hasOverride(custom))
+		{
+			return nativeColor;
+		}
+
+		if (config.respectExternalColors())
+		{
+			boolean inlineSpecial =
+				!sameRgb(
+					nativeColor,
+					baseColor
+				);
+
+			boolean specialBase =
+				!sameRgb(
+					baseColor,
+					VANILLA_BODY
+				);
+
+			if (inlineSpecial || specialBase)
 			{
-				for (Widget opt : optWidgets)
-				{
-					safeBlank(opt);
-				}
+				return nativeColor;
 			}
 		}
+
+		return custom;
 	}
 
-	/** Blanks {@code widget}'s text only if it is currently non-empty. */
-	private static void safeBlank(Widget widget)
+	private Color resolveSpeakerColor(
+		Color nativeColor)
 	{
-		if (widget == null)
+		Color safe =
+			nativeColor != null
+				? nativeColor
+				: VANILLA_SPEAKER;
+
+		Color custom = config.speakerColor();
+
+		if (!hasOverride(custom))
 		{
-			return;
+			return safe;
 		}
-		String t = widget.getText();
-		if (t != null && !t.isEmpty())
+
+		if (config.respectExternalColors() &&
+			!sameRgb(safe, VANILLA_SPEAKER))
 		{
-			widget.setText("");
+			return safe;
 		}
+
+		return custom;
 	}
 
-	/**
-	 * Re-applies the camouflage colour to an option widget every frame.
-	 * Text content is intentionally preserved — only the colour is changed.
-	 */
-	private static void safeCamouflage(Widget widget)
+	private boolean isExternallyStyledOption(
+		String text,
+		Color nativeColor)
 	{
-		if (widget == null)
+		Color safe =
+			nativeColor != null
+				? nativeColor
+				: VANILLA_OPTION;
+
+		boolean numbered =
+			text != null &&
+				text.matches("^\\[\\d+\\]\\s.*");
+
+		boolean specialColor =
+			!sameRgb(
+				safe,
+				VANILLA_OPTION
+			) &&
+			!sameRgb(
+				safe,
+				VANILLA_HOVER
+			);
+
+		return numbered || specialColor;
+	}
+
+	private Color resolveOptionColor(
+		String text,
+		Color nativeColor)
+	{
+		Color safe =
+			nativeColor != null
+				? nativeColor
+				: VANILLA_OPTION;
+
+		Color custom =
+			config.optionColor();
+
+		if (!hasOverride(custom))
 		{
-			return;
+			return safe;
 		}
-		widget.setTextColor(DialogueWidgetManager.OPTION_CAMOUFLAGE_COLOR);
+
+		if (config.respectExternalColors() &&
+			isExternallyStyledOption(text, safe))
+		{
+			return safe;
+		}
+
+		return custom;
+	}
+
+	private Color resolveStatusColor(
+		Color nativeColor)
+	{
+		Color safe =
+			nativeColor != null
+				? nativeColor
+				: VANILLA_STATUS;
+
+		Color custom =
+			config.statusColor();
+
+		if (!hasOverride(custom))
+		{
+			return safe;
+		}
+
+		if (config.respectExternalColors() &&
+			!sameRgb(safe, VANILLA_STATUS))
+		{
+			return safe;
+		}
+
+		return custom;
+	}
+
+	private static boolean hasOverride(Color color)
+	{
+		return color != null &&
+			color.getAlpha() > 0;
+	}
+
+	private static boolean sameRgb(
+		Color a,
+		Color b)
+	{
+		if (a == null || b == null)
+		{
+			return false;
+		}
+
+		return (a.getRGB() & 0xFFFFFF) ==
+			(b.getRGB() & 0xFFFFFF);
 	}
 }
-

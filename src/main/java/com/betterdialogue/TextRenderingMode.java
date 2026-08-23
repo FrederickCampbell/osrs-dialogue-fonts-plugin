@@ -22,34 +22,20 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.betterdialogue;
 
-/**
- * Font choices available in the config panel.
- * All values are Java logical font names that are guaranteed to resolve on
- * every OS (Windows, macOS, Linux) without any bundled TTF files.
- */
-public enum FontChoice
+public enum TextRenderingMode
 {
-	SANS_SERIF("SansSerif", "Sans Serif"),        // Arial on Windows, Helvetica on Mac, DejaVu on Linux
-	SERIF("Serif", "Serif"),                       // Times New Roman / similar
-	MONOSPACED("Monospaced", "Monospaced"),        // Courier New / similar
-	DIALOG("Dialog", "Dialog"),                    // Java default UI font
-	DIALOG_INPUT("DialogInput", "Dialog Input");   // Java default monospaced UI font
+	SYSTEM_DEFAULT("System Default"),
+	GRAYSCALE("Grayscale"),
+	CRISP("Crisp / No AA");
 
-	private final String javaName;
 	private final String displayName;
 
-	FontChoice(String javaName, String displayName)
+	TextRenderingMode(String displayName)
 	{
-		this.javaName = javaName;
 		this.displayName = displayName;
-	}
-
-	/** The name to pass to {@code new Font(name, style, size)}. */
-	public String getJavaName()
-	{
-		return javaName;
 	}
 
 	@Override

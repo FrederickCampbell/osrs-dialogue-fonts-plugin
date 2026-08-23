@@ -1,27 +1,10 @@
-# Build
+.gradle/
 build/
 out/
-*.class
-
-# Gradle
-.gradle/
-gradle.properties
-
-# IDE
 .idea/
 *.iml
-.vscode/
-.settings/
 .classpath
 .project
-nbactions.xml
-nb-configuration.xml
-nbproject/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Build artifacts / run logs
-stderr.txt
-stdout.txt
+.settings/
+.dialogue-fonts-plus-backups/
+*.log

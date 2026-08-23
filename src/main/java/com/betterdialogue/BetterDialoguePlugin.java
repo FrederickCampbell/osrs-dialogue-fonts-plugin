@@ -22,55 +22,41 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.betterdialogue;
 
 import com.google.inject.Provides;
+import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.events.ClientTick;
+import net.runelite.api.events.BeforeRender;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
 
-import javax.inject.Inject;
-
-/**
- * Dialogue Fonts — replaces the hard-to-read OSRS bitmap cursive (Quill 8)
- * with a clean, configurable TrueType font rendered through RuneLite's
- * {@link net.runelite.client.ui.overlay.Overlay} system.
- *
- * <h3>Rendering pipeline (per game tick)</h3>
- * <pre>
- * onGameTick
- *   └─ DialogueWidgetManager.getCurrentDialogue()
- *       ├─ detect visible dialogue widget
- *       ├─ extract + parse text
- *       ├─ blank original widget text (setText(""))
- *       └─ return DialogueState snapshot
- *
- * BetterDialogueOverlay.render(Graphics2D)
- *   ├─ read DialogueState
- *   ├─ fill background over text area
- *   └─ draw replacement text (word-wrapped, colour-tagged)
- * </pre>
- *
- * <h3>Text hiding strategy</h3>
- * This plugin uses <em>Option A</em> from the blueprint: calling
- * {@link net.runelite.api.widgets.Widget#setText(String) Widget.setText("")}
- * each tick on the text children only.  The widget's click handler is bound to
- * widget bounds, not text content, so "Click here to continue" and option
- * selection remain fully functional.  Original text is restored in
- * {@link #shutDown()} via {@link DialogueWidgetManager#restoreAll()}.
- */
 @Slf4j
 @PluginDescriptor(
-	name = "Dialogue Fonts",
-	description = "Replaces the OSRS dialogue font with a clean, readable TrueType font",
-	tags = {"dialogue", "font", "accessibility", "text", "npc", "chat", "readable"}
+	name = "Better Dialogue Boxes",
+	description = "Compatibility-first custom TrueType OSRS dialogue with Quest Helper preservation and overflow scrolling",
+	tags = {
+		"dialogue",
+		"font",
+		"accessibility",
+		"text",
+		"npc",
+		"chat",
+		"quest helper",
+		"scroll"
+	}
 )
 public class BetterDialoguePlugin extends Plugin
 {
+	private static final String CONFIG_GROUP =
+		"dialoguefontsplus";
+
 	@Inject
 	private OverlayManager overlayManager;
 
@@ -80,53 +66,108 @@ public class BetterDialoguePlugin extends Plugin
 	@Inject
 	private DialogueWidgetManager widgetManager;
 
-	// -------------------------------------------------------------------------
-	// Lifecycle
-	// -------------------------------------------------------------------------
+	@Inject
+	private DialogueDiagnostics diagnostics;
+
+	@Inject
+	private DialogueScrollController scrollController;
+
+	@Inject
+	private OptionSelectionFeedback optionSelectionFeedback;
+
+	@Inject
+	private EventBus eventBus;
+
+	private EventBus.Subscriber restoreFontsSubscriber;
 
 	@Override
 	protected void startUp()
 	{
+		diagnostics.startSession();
+
+		// PluginManager registers @Subscribe methods only AFTER startUp().
+		// A second annotated BeforeRender method is illegal because RuneLite
+		// requires the exact method name "onBeforeRender". Register the early
+		// restore phase programmatically instead.
+		restoreFontsSubscriber = eventBus.register(
+			BeforeRender.class,
+			event -> widgetManager.restoreSuppressedFontsForPluginLogic(),
+			1000f
+		);
+
+		scrollController.startUp();
+		optionSelectionFeedback.startUp();
 		overlayManager.add(overlay);
-		log.debug("Dialogue Fonts started");
+
+		log.info(
+			"Dialogue Fonts+ v4.4.1 started; diagnostics: {}",
+			diagnostics.getLogFile()
+		);
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		if (restoreFontsSubscriber != null)
+		{
+			eventBus.unregister(restoreFontsSubscriber);
+			restoreFontsSubscriber = null;
+		}
+
 		overlayManager.remove(overlay);
-		// Restore any widget text we blanked so nothing is left broken
 		widgetManager.restoreAll();
-		// Clear the overlay state so stale text isn't painted after re-enable
+		scrollController.shutDown();
+		optionSelectionFeedback.shutDown();
 		overlay.setState(null);
-		log.debug("Dialogue Fonts stopped");
+		diagnostics.endSession();
+
+		log.debug("Dialogue Fonts+ v4.4.1 stopped");
 	}
 
-	// -------------------------------------------------------------------------
-	// Events
-	// -------------------------------------------------------------------------
-
 	/**
-	 * Fires every client frame (~50/s), not just every server tick (~1.67/s).
-	 * Using ClientTick instead of GameTick prevents the one-frame flash of the
-	 * original bitmap font that would occur when a dialogue first opens and the
-	 * game sets the widget text before the next 600 ms game tick would fire.
+	 * Low priority is deliberate. RuneLite invokes higher-priority subscribers
+	 * first, so Quest Helper/other plugins get to mutate text/colors/listeners
+	 * before Dialogue Fonts+ snapshots the final state.
 	 */
-	@Subscribe
-	public void onClientTick(ClientTick event)
+	@Subscribe(priority = -1000f)
+	public void onBeforeRender(BeforeRender event)
 	{
-		DialogueState state = widgetManager.getCurrentDialogue();
+		diagnostics.capturePreMutation();
+
+		DialogueState state =
+			widgetManager.captureAndTemporarilySuppress();
+
 		overlay.setState(state);
 	}
 
-	// -------------------------------------------------------------------------
-	// Config
-	// -------------------------------------------------------------------------
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!CONFIG_GROUP.equals(event.getGroup()))
+		{
+			return;
+		}
+
+		widgetManager.restoreAll();
+
+		if ("replaceNpc".equals(event.getKey()) ||
+			"replacePlayer".equals(event.getKey()) ||
+			"replaceOptions".equals(event.getKey()) ||
+			"replaceSprite".equals(event.getKey()) ||
+			"replaceStatus".equals(event.getKey()))
+		{
+			scrollController.reset();
+			overlay.setState(null);
+		}
+	}
 
 	@Provides
-	BetterDialogueConfig provideConfig(ConfigManager configManager)
+	BetterDialogueConfig provideConfig(
+		ConfigManager configManager)
 	{
-		return configManager.getConfig(BetterDialogueConfig.class);
+		return configManager.getConfig(
+			BetterDialogueConfig.class
+		);
 	}
 }
 

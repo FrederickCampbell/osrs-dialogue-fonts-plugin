@@ -22,302 +22,582 @@
  * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+
 package com.betterdialogue;
 
-import lombok.extern.slf4j.Slf4j;
-
-import javax.inject.Inject;
-import javax.inject.Singleton;
+import java.awt.Color;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics2D;
-import java.awt.Color;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.Shape;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import javax.inject.Inject;
+import javax.inject.Singleton;
 
-/**
- * Provides font creation, caching, rendering-hint application, and word-wrap /
- * centred-text drawing utilities used by {@link BetterDialogueOverlay}.
- *
- * <p>Fonts are created from Java logical font names (SansSerif, Serif, etc.)
- * which are always available on every OS with no bundled TTF files required.
- * The derived {@link Font} object is cached and only rebuilt when the config
- * changes (font family, size, or bold flag).
- *
- * <h3>Statelessness contract</h3>
- * The only mutable state is the font cache.  All layout information (bounds,
- * segments) is passed in per call and is never stored on the instance.
- */
-@Slf4j
 @Singleton
 public class FontRenderer
 {
 	@Inject
 	private BetterDialogueConfig config;
 
-	// -------------------------------------------------------------------------
-	// Font cache — invalidated when any config key that affects the font changes
-	// -------------------------------------------------------------------------
-
-	private Font   cachedFont    = null;
-	private String lastFontKey   = null;
-
-	// -------------------------------------------------------------------------
-	// Font access
-	// -------------------------------------------------------------------------
-
-	/**
-	 * Returns the currently configured {@link Font}, rebuilding it only when
-	 * the font family, size, or bold flag has changed since the last call.
-	 */
-	public Font getFont()
+	public Font getBaseFont()
 	{
-		String key = config.fontFamily().getJavaName()
-			+ "_" + config.fontSize()
-			+ "_" + config.boldText();
-
-		if (!key.equals(lastFontKey))
+		if (config.fontType() == null)
 		{
-			int style = config.boldText() ? Font.BOLD : Font.PLAIN;
-			cachedFont  = new Font(config.fontFamily().getJavaName(), style, config.fontSize());
-			lastFontKey = key;
-			log.debug("Font rebuilt: {}", key);
+			return new Font(Font.SANS_SERIF, Font.PLAIN, 14);
 		}
-		return cachedFont;
+		return config.fontType().getFont();
 	}
 
-	/**
-	 * Returns the font used for option-dialogue rows.
-	 * Option rows share the same configured font as body text — "one font for
-	 * everything" keeps the config panel simple.
-	 */
-	public Font getOptionFont()
+	public Font getFont(ElementFontStyle style)
 	{
-		return getFont();
+		Font base = getBaseFont();
+		return style == null
+			? base
+			: style.apply(base);
 	}
 
-	// -------------------------------------------------------------------------
-	// Rendering helpers
-	// -------------------------------------------------------------------------
-
-	/**
-	 * Applies (or removes) text anti-aliasing rendering hints based on the
-	 * current config.  Call once per {@link BetterDialogueOverlay#render} frame
-	 * before drawing any text.
-	 */
-	public void applyRenderingHints(Graphics2D g)
+	public void applyRenderingMode(Graphics2D g)
 	{
-		if (config.antiAlias())
+		switch (config.renderingMode())
 		{
-			g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
-				RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
-			g.setRenderingHint(RenderingHints.KEY_RENDERING,
-				RenderingHints.VALUE_RENDER_QUALITY);
-			g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS,
-				RenderingHints.VALUE_FRACTIONALMETRICS_ON);
-		}
-		else
-		{
-			g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
-				RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
+			case GRAYSCALE:
+				g.setRenderingHint(
+					RenderingHints.KEY_TEXT_ANTIALIASING,
+					RenderingHints.VALUE_TEXT_ANTIALIAS_ON
+				);
+				g.setRenderingHint(
+					RenderingHints.KEY_FRACTIONALMETRICS,
+					RenderingHints.VALUE_FRACTIONALMETRICS_OFF
+				);
+				break;
+
+			case CRISP:
+				g.setRenderingHint(
+					RenderingHints.KEY_TEXT_ANTIALIASING,
+					RenderingHints.VALUE_TEXT_ANTIALIAS_OFF
+				);
+				g.setRenderingHint(
+					RenderingHints.KEY_FRACTIONALMETRICS,
+					RenderingHints.VALUE_FRACTIONALMETRICS_OFF
+				);
+				break;
+
+			case SYSTEM_DEFAULT:
+			default:
+				// Match the practical Modern Chat path: keep the Graphics2D defaults.
+				break;
 		}
 	}
 
-	/**
-	 * Draws a single-line string centred horizontally within {@code bounds}
-	 * using an explicitly supplied {@code font}.
-	 *
-	 * @return the y coordinate of the bottom of the drawn line
-	 */
-	public int drawCenteredString(Graphics2D g, String text, Rectangle bounds, int y, Color color, Font font)
+	public Font fitSingleLineFont(
+		Graphics2D g,
+		String text,
+		Rectangle bounds,
+		ElementFontStyle style)
 	{
-		if (text == null || text.isEmpty())
+		Font selected = getFont(style);
+
+		if (text == null || text.isEmpty() || bounds == null)
 		{
-			return y;
+			return selected;
 		}
+
+		float size = selected.getSize2D();
+		Font font = selected;
+
+		while (size > 6f)
+		{
+			g.setFont(font);
+			FontMetrics fm = g.getFontMetrics(font);
+
+			int glyphHeight = fm.getAscent() + fm.getDescent();
+			int width = fm.stringWidth(text);
+
+			if (glyphHeight <= Math.max(1, bounds.height - 1) &&
+				width <= Math.max(1, bounds.width - 4))
+			{
+				break;
+			}
+
+			size -= 1f;
+			font = selected.deriveFont(size);
+		}
+
+		return font;
+	}
+
+	public void drawSingleLine(
+		Graphics2D g,
+		String text,
+		Rectangle bounds,
+		Color color,
+		ElementFontStyle style)
+	{
+		if (text == null || text.isEmpty() || bounds == null)
+		{
+			return;
+		}
+
+		Font font =
+			fitSingleLineFont(g, text, bounds, style);
+
 		g.setFont(font);
-		g.setColor(color);
 		FontMetrics fm = g.getFontMetrics(font);
-		int x = bounds.x + (bounds.width - fm.stringWidth(text)) / 2;
-		g.drawString(text, x, y + fm.getAscent());
-		return y + fm.getHeight();
+
+		int x =
+			bounds.x +
+			(bounds.width - fm.stringWidth(text)) / 2;
+
+		int baseline =
+			bounds.y +
+			(bounds.height - (fm.getAscent() + fm.getDescent())) / 2 +
+			fm.getAscent();
+
+		drawText(g, text, x, baseline, color);
 	}
 
-	/**
-	 * Draws a single-line string centred horizontally within {@code bounds}
-	 * using the currently configured font.
-	 *
-	 * @return the y coordinate of the bottom of the drawn line
-	 */
-	public int drawCenteredString(Graphics2D g, String text, Rectangle bounds, int y, Color color)
-	{
-		return drawCenteredString(g, text, bounds, y, color, getFont());
-	}
-
-	/**
-	 * Word-wraps {@code segments} to fit within {@code bounds.width} and draws
-	 * each line centred horizontally.
-	 *
-	 * @param g        graphics context
-	 * @param segments styled text segments (may contain {@code '\n'} for forced breaks)
-	 * @param bounds   the text area rectangle (used for width constraint and x origin)
-	 * @param startY   top y coordinate of the first line
-	 * @return y coordinate immediately below the last drawn line
-	 */
-	public int drawWrappedText(Graphics2D g,
-	                           List<TextSegment> segments,
-	                           Rectangle bounds,
-	                           int startY)
+	public WrappedLayout layout(
+		Graphics2D g,
+		List<TextSegment> segments,
+		int maxWidth,
+		ElementFontStyle style)
 	{
 		if (segments == null || segments.isEmpty())
 		{
-			return startY;
+			return WrappedLayout.empty();
 		}
 
-		Font font = getFont();
+		Font font = getFont(style);
 		g.setFont(font);
 		FontMetrics fm = g.getFontMetrics(font);
 
-		int maxWidth  = bounds.width - 8; // 4 px horizontal padding each side
-		int lineHeight = fm.getHeight();
-		int y = startY;
+		int width = Math.max(1, maxWidth);
+		int spaceWidth = fm.stringWidth(" ");
+		List<WordToken> tokens = tokeniseAndSplit(
+			segments,
+			fm,
+			width
+		);
 
-		List<WordToken> tokens = tokenise(segments);
-		List<List<WordToken>> lines = layoutLines(tokens, fm, maxWidth);
+		boolean preserveSourceBreaks =
+			sourceBreaksStillFit(
+				tokens,
+				fm,
+				width
+			);
 
-		for (List<WordToken> line : lines)
-		{
-			if (y + lineHeight > bounds.y + bounds.height)
-			{
-				break; // no more vertical space
-			}
-
-			int lineWidth = measureLine(line, fm);
-			int x = bounds.x + (bounds.width - lineWidth) / 2;
-
-			boolean firstToken = true;
-			for (WordToken tok : line)
-			{
-				if (!firstToken)
-				{
-					g.setColor(tok.color);
-					g.drawString(" ", x, y + fm.getAscent());
-					x += fm.stringWidth(" ");
-				}
-				g.setColor(tok.color);
-				g.drawString(tok.word, x, y + fm.getAscent());
-				x += fm.stringWidth(tok.word);
-				firstToken = false;
-			}
-			y += lineHeight;
-		}
-
-		return y;
-	}
-
-	// -------------------------------------------------------------------------
-	// Private layout helpers
-	// -------------------------------------------------------------------------
-
-	private static List<WordToken> tokenise(List<TextSegment> segments)
-	{
-		List<WordToken> tokens = new ArrayList<>();
-		for (TextSegment seg : segments)
-		{
-			String[] lines = seg.getText().split("\n", -1);
-			for (int li = 0; li < lines.length; li++)
-			{
-				for (String word : lines[li].split(" ", -1))
-				{
-					if (!word.isEmpty())
-					{
-						tokens.add(new WordToken(word, seg.getColor(), false));
-					}
-				}
-				if (li < lines.length - 1)
-				{
-					tokens.add(new WordToken("", seg.getColor(), true));
-				}
-			}
-		}
-		return tokens;
-	}
-
-	private static List<List<WordToken>> layoutLines(List<WordToken> tokens,
-	                                                  FontMetrics fm,
-	                                                  int maxWidth)
-	{
-		List<List<WordToken>> lines = new ArrayList<>();
+		List<VisualLine> lines = new ArrayList<>();
 		List<WordToken> current = new ArrayList<>();
 		int currentWidth = 0;
-		int spaceWidth = fm.stringWidth(" ");
 
-		for (WordToken tok : tokens)
+		for (WordToken token : tokens)
 		{
-			if (tok.newline)
+			if (token.hardBreak)
 			{
-				lines.add(new ArrayList<>(current));
+				if (!preserveSourceBreaks)
+				{
+					// The custom font already forced one original Jagex line to
+					// wrap, so its old <br> positions are now stale. Reflow the
+					// paragraph naturally instead of creating tiny orphan lines.
+					continue;
+				}
+
+				lines.add(
+					new VisualLine(
+						new ArrayList<>(current),
+						currentWidth
+					)
+				);
 				current.clear();
 				currentWidth = 0;
 				continue;
 			}
 
-			int wordWidth   = fm.stringWidth(tok.word);
-			int widthNeeded = current.isEmpty() ? wordWidth : (spaceWidth + wordWidth);
+			int tokenWidth = fm.stringWidth(token.text);
+			int needed =
+				current.isEmpty()
+					? tokenWidth
+					: spaceWidth + tokenWidth;
 
-			if (!current.isEmpty() && currentWidth + widthNeeded > maxWidth)
+			if (!current.isEmpty() &&
+				currentWidth + needed > width)
 			{
-				lines.add(new ArrayList<>(current));
+				lines.add(
+					new VisualLine(
+						new ArrayList<>(current),
+						currentWidth
+					)
+				);
+
 				current.clear();
 				currentWidth = 0;
-				widthNeeded  = wordWidth;
+				needed = tokenWidth;
 			}
 
-			current.add(tok);
-			currentWidth += widthNeeded;
+			current.add(token);
+			currentWidth += needed;
 		}
 
 		if (!current.isEmpty())
 		{
-			lines.add(current);
+			lines.add(
+				new VisualLine(
+					new ArrayList<>(current),
+					currentWidth
+				)
+			);
 		}
 
-		return lines;
+		int glyphHeight =
+			fm.getAscent() + fm.getDescent();
+
+		int lineHeight =
+			Math.max(
+				1,
+				glyphHeight + config.lineSpacing()
+			);
+
+		int contentHeight =
+			lines.isEmpty()
+				? 0
+				: glyphHeight +
+					Math.max(0, lines.size() - 1) * lineHeight;
+
+		return new WrappedLayout(
+			font,
+			lines,
+			lineHeight,
+			glyphHeight,
+			contentHeight
+		);
 	}
 
-	private static int measureLine(List<WordToken> line, FontMetrics fm)
+	public void drawWrapped(
+		Graphics2D g,
+		WrappedLayout layout,
+		Rectangle viewport,
+		int scrollOffset,
+		boolean verticallyCenter)
 	{
-		int width = 0;
-		int spaceWidth = fm.stringWidth(" ");
-		for (int i = 0; i < line.size(); i++)
+		if (layout == null ||
+			layout.lines.isEmpty() ||
+			viewport == null)
 		{
-			if (i > 0)
-			{
-				width += spaceWidth;
-			}
-			width += fm.stringWidth(line.get(i).word);
+			return;
 		}
-		return width;
+
+		g.setFont(layout.font);
+		FontMetrics fm =
+			g.getFontMetrics(layout.font);
+
+		int top;
+
+		if (verticallyCenter)
+		{
+			top =
+				viewport.y +
+				(viewport.height - layout.contentHeight) / 2;
+		}
+		else
+		{
+			top = viewport.y + 2 - scrollOffset;
+		}
+
+		int baseline = top + fm.getAscent();
+
+		Shape oldClip = g.getClip();
+		g.clip(viewport);
+
+		try
+		{
+			for (VisualLine line : layout.lines)
+			{
+				if (baseline + fm.getDescent() >= viewport.y &&
+					baseline - fm.getAscent() <=
+						viewport.y + viewport.height)
+				{
+					int x =
+						viewport.x +
+						(viewport.width - line.width) / 2;
+
+					for (int i = 0; i < line.tokens.size(); i++)
+					{
+						WordToken token = line.tokens.get(i);
+
+						if (i > 0)
+						{
+							x += fm.stringWidth(" ");
+						}
+
+						drawText(
+							g,
+							token.text,
+							x,
+							baseline,
+							token.color
+						);
+
+						x += fm.stringWidth(token.text);
+					}
+				}
+
+				baseline += layout.lineHeight;
+			}
+		}
+		finally
+		{
+			g.setClip(oldClip);
+		}
 	}
 
-	// -------------------------------------------------------------------------
-	// Inner types
-	// -------------------------------------------------------------------------
+	private void drawText(
+		Graphics2D g,
+		String text,
+		int x,
+		int baseline,
+		Color color)
+	{
+		TextDrawUtil.drawText(
+			g,
+			text,
+			x,
+			baseline,
+			color,
+			config.shadowColor(),
+			config.textShadow(),
+			config.outlineColor(),
+			config.textOutline()
+		);
+	}
+
+	private static boolean sourceBreaksStillFit(
+		List<WordToken> tokens,
+		FontMetrics fm,
+		int maxWidth)
+	{
+		boolean hasBreak = false;
+		int lineWidth = 0;
+		int spaceWidth = fm.stringWidth(" ");
+		boolean firstWord = true;
+
+		for (WordToken token : tokens)
+		{
+			if (token.hardBreak)
+			{
+				hasBreak = true;
+				lineWidth = 0;
+				firstWord = true;
+				continue;
+			}
+
+			int tokenWidth = fm.stringWidth(token.text);
+			lineWidth +=
+				firstWord
+					? tokenWidth
+					: spaceWidth + tokenWidth;
+
+			if (lineWidth > maxWidth)
+			{
+				return false;
+			}
+
+			firstWord = false;
+		}
+
+		return hasBreak;
+	}
+
+	private static List<WordToken> tokeniseAndSplit(
+		List<TextSegment> segments,
+		FontMetrics fm,
+		int maxWidth)
+	{
+		List<WordToken> out = new ArrayList<>();
+
+		for (TextSegment segment : segments)
+		{
+			if (segment == null ||
+				segment.getText() == null ||
+				segment.getText().isEmpty())
+			{
+				continue;
+			}
+
+			String[] forcedLines =
+				segment.getText().split("\\n", -1);
+
+			for (int lineIndex = 0;
+				lineIndex < forcedLines.length;
+				lineIndex++)
+			{
+				String line = forcedLines[lineIndex].trim();
+
+				if (!line.isEmpty())
+				{
+					String[] words =
+						line.split("[\\t ]+");
+
+					for (String word : words)
+					{
+						if (word.isEmpty())
+						{
+							continue;
+						}
+
+						appendWordOrChunks(
+							out,
+							word,
+							segment.getColor(),
+							fm,
+							maxWidth
+						);
+					}
+				}
+
+				if (lineIndex < forcedLines.length - 1)
+				{
+					out.add(WordToken.hardBreak());
+				}
+			}
+		}
+
+		return out;
+	}
+
+	private static void appendWordOrChunks(
+		List<WordToken> out,
+		String word,
+		Color color,
+		FontMetrics fm,
+		int maxWidth)
+	{
+		if (fm.stringWidth(word) <= maxWidth)
+		{
+			out.add(new WordToken(word, color, false));
+			return;
+		}
+
+		// Pathological long token: split by characters instead of overflowing.
+		StringBuilder chunk = new StringBuilder();
+
+		for (int i = 0; i < word.length(); i++)
+		{
+			char ch = word.charAt(i);
+			String candidate = chunk.toString() + ch;
+
+			if (chunk.length() > 0 &&
+				fm.stringWidth(candidate) > maxWidth)
+			{
+				out.add(
+					new WordToken(
+						chunk.toString(),
+						color,
+						false
+					)
+				);
+				chunk.setLength(0);
+			}
+
+			chunk.append(ch);
+		}
+
+		if (chunk.length() > 0)
+		{
+			out.add(
+				new WordToken(
+					chunk.toString(),
+					color,
+					false
+				)
+			);
+		}
+	}
+
+	public static final class WrappedLayout
+	{
+		private static final WrappedLayout EMPTY =
+			new WrappedLayout(
+				new Font(Font.SANS_SERIF, Font.PLAIN, 12),
+				Collections.emptyList(),
+				1,
+				1,
+				0
+			);
+
+		private final Font font;
+		private final List<VisualLine> lines;
+		private final int lineHeight;
+		private final int glyphHeight;
+		private final int contentHeight;
+
+		private WrappedLayout(
+			Font font,
+			List<VisualLine> lines,
+			int lineHeight,
+			int glyphHeight,
+			int contentHeight)
+		{
+			this.font = font;
+			this.lines = lines;
+			this.lineHeight = lineHeight;
+			this.glyphHeight = glyphHeight;
+			this.contentHeight = contentHeight;
+		}
+
+		public static WrappedLayout empty()
+		{
+			return EMPTY;
+		}
+
+		public int getContentHeight()
+		{
+			return contentHeight;
+		}
+
+		public int getLineHeight()
+		{
+			return lineHeight;
+		}
+	}
+
+	private static final class VisualLine
+	{
+		private final List<WordToken> tokens;
+		private final int width;
+
+		private VisualLine(
+			List<WordToken> tokens,
+			int width)
+		{
+			this.tokens = tokens;
+			this.width = width;
+		}
+	}
 
 	private static final class WordToken
 	{
-		final String  word;
-		final Color   color;
-		final boolean newline;
+		private final String text;
+		private final Color color;
+		private final boolean hardBreak;
 
-		WordToken(String word, Color color, boolean newline)
+		private WordToken(
+			String text,
+			Color color,
+			boolean hardBreak)
 		{
-			this.word    = word;
-			this.color   = color;
-			this.newline = newline;
+			this.text = text;
+			this.color = color;
+			this.hardBreak = hardBreak;
+		}
+
+		private static WordToken hardBreak()
+		{
+			return new WordToken("", Color.BLACK, true);
 		}
 	}
 }
-

@@ -28,7 +28,7 @@ dependencies {
 }
 
 group = 'com.betterdialogue'
-version = '1.0.0'
+version = '4.4.1-local'
 
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
@@ -68,3 +68,10 @@ tasks.register('shadowJar', Jar) {
 	archiveClassifier.set('shadow')
 	archiveFileName.set("${rootProject.name}-${project.version}-all.jar")
 }
+
+
+
+
+
+
+

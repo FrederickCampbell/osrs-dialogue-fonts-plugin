@@ -25,35 +25,43 @@
 
 package com.betterdialogue;
 
-import java.awt.Color;
-import java.awt.Rectangle;
-import java.util.List;
-import lombok.Data;
+import java.awt.Font;
 
-/**
- * A render snapshot captured after Jagex/Quest Helper/other plugins have had a
- * chance to mutate the dialogue, but before native glyph rasterization.
- */
-@Data
-public class DialogueState
+public enum ElementFontStyle
 {
-	private final DialogueType type;
+	INHERIT("Inherit font setting", -1),
+	REGULAR("Regular", Font.PLAIN),
+	BOLD("Bold", Font.BOLD),
+	ITALIC("Italic", Font.ITALIC),
+	BOLD_ITALIC("Bold Italic", Font.BOLD | Font.ITALIC);
 
-	private final String speakerOrTitle;
-	private final List<TextSegment> bodySegments;
-	private final List<String> options;
-	private final String statusText;
+	private final String displayName;
+	private final int awtStyle;
 
-	private final Rectangle bodyBounds;
-	private final Rectangle speakerBounds;
-	private final Rectangle[] optionBounds;
-	private final Rectangle statusBounds;
+	ElementFontStyle(String displayName, int awtStyle)
+	{
+		this.displayName = displayName;
+		this.awtStyle = awtStyle;
+	}
 
-	private final Color bodyBaseColor;
-	private final Color speakerColor;
-	private final Color optionTitleColor;
-	private final Color[] optionColors;
-	private final Color statusColor;
+	public Font apply(Font base)
+	{
+		if (base == null)
+		{
+			return null;
+		}
 
-	private final String dialogueKey;
+		if (this == INHERIT)
+		{
+			return base;
+		}
+
+		return base.deriveFont(awtStyle, base.getSize2D());
+	}
+
+	@Override
+	public String toString()
+	{
+		return displayName;
+	}
 }
