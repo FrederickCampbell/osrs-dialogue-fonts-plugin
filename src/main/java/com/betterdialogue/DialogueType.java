@@ -37,6 +37,8 @@ public enum DialogueType
 	OPTION_DIALOGUE,
 	/** Item / action text ("You light the logs"). */
 	SPRITE_DIALOGUE,
+	/** Narrator / environmental text shown in the chatbox message layer. */
+	MESSAGE_BOX,
 	/** Level-up congratulations box. */
 	LEVEL_UP,
 	/** Quest completion scroll. */

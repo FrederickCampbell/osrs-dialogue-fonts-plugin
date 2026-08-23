@@ -4,6 +4,8 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.widgets.InterfaceID;
 import net.runelite.api.widgets.Widget;
+import net.runelite.api.widgets.WidgetID;
+import net.runelite.api.widgets.WidgetType;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -13,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -27,8 +30,11 @@ public class DialogueDiagnostics
 	private static final DateTimeFormatter TIME =
 		DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
 
-	private static final int MAX_TOP_LEVEL_CHILD = 32;
-	private static final int MAX_DEPTH = 6;
+	private static final DateTimeFormatter ARCHIVE_TIME =
+		DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS");
+
+	private static final int MAX_TOP_LEVEL_CHILD = 96;
+	private static final int MAX_DEPTH = 8;
 
 	@Inject
 	private Client client;
@@ -59,10 +65,12 @@ public class DialogueDiagnostics
 		try
 		{
 			Files.createDirectories(logDirectory);
+			archivePreviousLog();
+			lastSnapshot = "";
 			String header =
 				"Dialogue Fonts diagnostic session\n" +
 				"Started: " + LocalDateTime.now().format(TIME) + "\n" +
-				"NOTE: PRE snapshots are captured in BeforeRender after other plugins have mutated dialogue and before Dialogue Fonts temporarily suppresses native glyph opacity.\n" +
+				"NOTE: PRE snapshots are captured in BeforeRender after other plugins have mutated dialogue and before Dialogue Fonts temporarily suppresses native glyph rendering.\n" +
 				"Log: " + logFile + "\n" +
 				"============================================================\n";
 			Files.write(
@@ -92,7 +100,7 @@ public class DialogueDiagnostics
 	}
 
 	/**
-	 * Captures the final live widget tree before DialogueWidgetManager temporarily changes opacity. A new snapshot is written only when it changes.
+	 * Captures the final live widget tree before DialogueWidgetManager temporarily suppresses native glyph rendering. A new snapshot is written only when it changes.
 	 */
 	public synchronized void capturePreMutation()
 	{
@@ -268,8 +276,243 @@ public class DialogueDiagnostics
 		appendGroupIfVisible(out, "PLAYER", InterfaceID.DIALOG_PLAYER, 0);
 		appendGroupIfVisible(out, "OPTION", InterfaceID.DIALOG_OPTION, 1);
 		appendGroupIfVisible(out, "SPRITE", InterfaceID.DIALOG_SPRITE, 0);
+		appendGroupIfVisible(
+			out,
+			"DOUBLE_SPRITE",
+			WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID,
+			0
+		);
+		appendMessageBoxIfVisible(out);
+		appendGroupIfVisible(
+			out,
+			"LEVEL_UP",
+			WidgetID.LEVEL_UP_GROUP_ID,
+			0
+		);
+		appendGroupIfVisible(
+			out,
+			"QUEST_COMPLETE",
+			WidgetID.QUEST_COMPLETED_GROUP_ID,
+			0
+		);
+
+		if (out.length() == 0)
+		{
+			appendUnknownChatboxCandidates(out);
+		}
 
 		return out.toString();
+	}
+
+
+	private void archivePreviousLog()
+		throws IOException
+	{
+		if (!Files.exists(logFile) ||
+			Files.size(logFile) == 0L)
+		{
+			return;
+		}
+
+		Path archiveDirectory =
+			logDirectory.resolve("archive");
+
+		Files.createDirectories(archiveDirectory);
+
+		Path archived =
+			archiveDirectory.resolve(
+				"dialogue-widget-log-" +
+					LocalDateTime.now().format(ARCHIVE_TIME) +
+					".txt"
+			);
+
+		Files.move(
+			logFile,
+			archived,
+			StandardCopyOption.REPLACE_EXISTING
+		);
+	}
+
+	private void appendMessageBoxIfVisible(
+		StringBuilder out)
+	{
+		Widget message =
+			client.getWidget(
+				WidgetID.CHATBOX_GROUP_ID,
+				43
+			);
+
+		if (message == null ||
+			message.isHidden() ||
+			message.getText() == null ||
+			message.getText().trim().isEmpty())
+		{
+			return;
+		}
+
+		appendGroupIfVisible(
+			out,
+			"MESSAGE_BOX",
+			WidgetID.CHATBOX_GROUP_ID,
+			0
+		);
+	}
+
+	private void appendUnknownChatboxCandidates(
+		StringBuilder out)
+	{
+		Widget chatbox =
+			client.getWidget(
+				WidgetID.CHATBOX_GROUP_ID,
+				0
+			);
+
+		if (chatbox == null ||
+			chatbox.isHidden() ||
+			chatbox.getBounds() == null)
+		{
+			return;
+		}
+
+		Widget[] roots = client.getWidgetRoots();
+
+		if (roots == null)
+		{
+			return;
+		}
+
+		Rectangle chatBounds =
+			new Rectangle(chatbox.getBounds());
+
+		StringBuilder candidates =
+			new StringBuilder();
+
+		Set<Widget> visited =
+			Collections.newSetFromMap(
+				new IdentityHashMap<>()
+			);
+
+		for (Widget root : roots)
+		{
+			scanUnknownChatboxText(
+				candidates,
+				root,
+				chatBounds,
+				0,
+				visited
+			);
+		}
+
+		if (candidates.length() > 0)
+		{
+			out.append(
+				"\n--- UNKNOWN CHATBOX TEXT CANDIDATES ---\n"
+			);
+			out.append(candidates);
+		}
+	}
+
+	private void scanUnknownChatboxText(
+		StringBuilder out,
+		Widget widget,
+		Rectangle chatBounds,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (widget == null ||
+			depth > MAX_DEPTH ||
+			!visited.add(widget) ||
+			widget.isHidden())
+		{
+			return;
+		}
+
+		int groupId = widget.getId() >>> 16;
+
+		if (!isKnownDialogueGroup(groupId) &&
+			widget.getType() == WidgetType.TEXT &&
+			widget.getText() != null &&
+			!widget.getText().trim().isEmpty())
+		{
+			Rectangle bounds = widget.getBounds();
+
+			if (bounds != null &&
+				bounds.width > 0 &&
+				bounds.height > 0 &&
+				bounds.intersects(chatBounds))
+			{
+				out.append(
+					describeWidget(
+						"U " +
+							groupId +
+							"." +
+							(widget.getId() & 0xFFFF),
+						widget
+					)
+				).append('\n');
+			}
+		}
+
+		scanUnknownChildren(
+			out,
+			widget.getStaticChildren(),
+			chatBounds,
+			depth,
+			visited
+		);
+
+		scanUnknownChildren(
+			out,
+			widget.getDynamicChildren(),
+			chatBounds,
+			depth,
+			visited
+		);
+
+		scanUnknownChildren(
+			out,
+			widget.getNestedChildren(),
+			chatBounds,
+			depth,
+			visited
+		);
+	}
+
+	private void scanUnknownChildren(
+		StringBuilder out,
+		Widget[] children,
+		Rectangle chatBounds,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (children == null)
+		{
+			return;
+		}
+
+		for (Widget child : children)
+		{
+			scanUnknownChatboxText(
+				out,
+				child,
+				chatBounds,
+				depth + 1,
+				visited
+			);
+		}
+	}
+
+	private static boolean isKnownDialogueGroup(
+		int groupId)
+	{
+		return groupId == InterfaceID.DIALOG_NPC ||
+			groupId == InterfaceID.DIALOG_PLAYER ||
+			groupId == InterfaceID.DIALOG_OPTION ||
+			groupId == InterfaceID.DIALOG_SPRITE ||
+			groupId == WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID ||
+			groupId == WidgetID.CHATBOX_GROUP_ID ||
+			groupId == WidgetID.LEVEL_UP_GROUP_ID ||
+			groupId == WidgetID.QUEST_COMPLETED_GROUP_ID;
 	}
 
 	private void appendGroupIfVisible(

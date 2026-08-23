@@ -136,6 +136,10 @@ public class BetterDialogueOverlay extends Overlay
 				renderSpriteDialogue(graphics, state);
 				break;
 
+			case MESSAGE_BOX:
+				renderSpriteDialogue(graphics, state);
+				break;
+
 			default:
 				break;
 		}

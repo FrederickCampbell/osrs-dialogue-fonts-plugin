@@ -41,6 +41,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.widgets.InterfaceID;
 import net.runelite.api.widgets.Widget;
+import net.runelite.api.widgets.WidgetID;
 import net.runelite.api.widgets.WidgetType;
 
 /**
@@ -73,8 +74,10 @@ public class DialogueWidgetManager
 	private static final int PLAYER_CHILD_TEXT = 6;
 
 	private static final int SPRITE_CHILD_TEXT = 2;
+	private static final int DOUBLE_SPRITE_CHILD_TEXT = 2;
+	private static final int CHATBOX_MESSAGE_CHILD = 43;
 
-	private static final int MAX_SCAN_CHILD = 32;
+	private static final int MAX_SCAN_CHILD = 96;
 	private static final int MAX_SCAN_DEPTH = 5;
 
 	private static final Pattern TAG_STRIP =
@@ -143,6 +146,30 @@ public class DialogueWidgetManager
 			config.replaceSprite())
 		{
 			return buildSpriteState(spriteRoot);
+		}
+
+		Widget doubleSpriteBody =
+			client.getWidget(
+				WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID,
+				DOUBLE_SPRITE_CHILD_TEXT
+			);
+
+		if (renderableTextWidget(doubleSpriteBody) &&
+			config.replaceSprite())
+		{
+			return buildDoubleSpriteState();
+		}
+
+		Widget messageBoxBody =
+			client.getWidget(
+				WidgetID.CHATBOX_GROUP_ID,
+				CHATBOX_MESSAGE_CHILD
+			);
+
+		if (config.replaceSprite() &&
+			isMessageBoxBody(messageBoxBody))
+		{
+			return buildMessageBoxState();
 		}
 
 		return null;
@@ -302,14 +329,56 @@ public class DialogueWidgetManager
 		);
 	}
 
+
 	private DialogueState buildSpriteState(
 		Widget spriteRoot)
 	{
-		Widget body =
+		return buildTextOnlyState(
+			DialogueType.SPRITE_DIALOGUE,
+			InterfaceID.DIALOG_SPRITE,
+			SPRITE_CHILD_TEXT,
+			spriteRoot,
+			false
+		);
+	}
+
+	private DialogueState buildDoubleSpriteState()
+	{
+		return buildTextOnlyState(
+			DialogueType.SPRITE_DIALOGUE,
+			WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID,
+			DOUBLE_SPRITE_CHILD_TEXT,
 			client.getWidget(
-				InterfaceID.DIALOG_SPRITE,
-				SPRITE_CHILD_TEXT
-			);
+				WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID,
+				0
+			),
+			false
+		);
+	}
+
+	private DialogueState buildMessageBoxState()
+	{
+		return buildTextOnlyState(
+			DialogueType.MESSAGE_BOX,
+			WidgetID.CHATBOX_GROUP_ID,
+			CHATBOX_MESSAGE_CHILD,
+			client.getWidget(
+				WidgetID.CHATBOX_GROUP_ID,
+				0
+			),
+			true
+		);
+	}
+
+	private DialogueState buildTextOnlyState(
+		DialogueType type,
+		int groupId,
+		int bodyChild,
+		Widget root,
+		boolean strongStatusOnly)
+	{
+		Widget body =
+			client.getWidget(groupId, bodyChild);
 
 		if (!renderableTextWidget(body))
 		{
@@ -318,10 +387,22 @@ public class DialogueWidgetManager
 
 		Widget status =
 			findStatusWidget(
-				InterfaceID.DIALOG_SPRITE,
+				groupId,
 				-1,
-				spriteRoot
+				root
 			);
+
+		if (status == body)
+		{
+			status = null;
+		}
+
+		if (strongStatusOnly &&
+			status != null &&
+			scoreStatusWidget(status) < 100)
+		{
+			status = null;
+		}
 
 		List<TextSegment> segments =
 			parseSegments(
@@ -343,7 +424,7 @@ public class DialogueWidgetManager
 				: stripTags(status.getText());
 
 		String key =
-			DialogueType.SPRITE_DIALOGUE.name() +
+			type.name() +
 			"|" +
 			flattenSegments(segments) +
 			"|" +
@@ -357,7 +438,7 @@ public class DialogueWidgetManager
 		}
 
 		return new DialogueState(
-			DialogueType.SPRITE_DIALOGUE,
+			type,
 			"",
 			segments,
 			null,
@@ -379,19 +460,19 @@ public class DialogueWidgetManager
 		);
 	}
 
+
 	private DialogueState buildOptionState(
 		Widget container)
 	{
-		Widget[] children =
-			container.getDynamicChildren();
+		List<Widget> rows =
+			collectOptionTextRows(container);
 
-		if (children == null ||
-			children.length == 0)
+		if (rows.isEmpty())
 		{
 			return null;
 		}
 
-		Widget title = children[0];
+		Widget title = findOptionTitle(rows);
 
 		String titleText =
 			title == null ||
@@ -418,12 +499,9 @@ public class DialogueWidgetManager
 		String waitText = "";
 		Color waitColor = new Color(0x0000FF);
 
-		for (int i = 1; i < children.length; i++)
+		for (Widget row : rows)
 		{
-			Widget row = children[i];
-
-			if (!renderableTextWidget(row) ||
-				row.getType() != WidgetType.TEXT)
+			if (row == title)
 			{
 				continue;
 			}
@@ -457,9 +535,9 @@ public class DialogueWidgetManager
 			colors.add(color(row.getTextColor()));
 		}
 
-		// Jagex can leave stale options in the child array for a fraction of a
-		// second after one row changes to "Please wait...". Suppress the native
-		// font on every row, then render only the real wait state.
+		// Quest Helper can mutate either ordinary or nested CHATMENU children.
+		// Suppress exactly the widgets we captured after those mutations; text,
+		// colors, listeners, prefixes, and hotkeys remain owned by Quest Helper.
 		suppressGlyphs(title);
 
 		for (Widget row : allTextRows)
@@ -523,6 +601,140 @@ public class DialogueWidgetManager
 			null,
 			key.toString()
 		);
+	}
+
+	private List<Widget> collectOptionTextRows(
+		Widget container)
+	{
+		List<Widget> rows = new ArrayList<>();
+
+		Set<Widget> seen =
+			Collections.newSetFromMap(
+				new IdentityHashMap<>()
+			);
+
+		addOptionRows(
+			rows,
+			seen,
+			container.getChildren()
+		);
+
+		addOptionRows(
+			rows,
+			seen,
+			container.getStaticChildren()
+		);
+
+		addOptionRows(
+			rows,
+			seen,
+			container.getDynamicChildren()
+		);
+
+		addOptionRows(
+			rows,
+			seen,
+			container.getNestedChildren()
+		);
+
+		rows.sort((left, right) ->
+		{
+			Rectangle a = left.getBounds();
+			Rectangle b = right.getBounds();
+
+			int ay = a == null ? Integer.MAX_VALUE : a.y;
+			int by = b == null ? Integer.MAX_VALUE : b.y;
+
+			if (ay != by)
+			{
+				return Integer.compare(ay, by);
+			}
+
+			int ax = a == null ? Integer.MAX_VALUE : a.x;
+			int bx = b == null ? Integer.MAX_VALUE : b.x;
+
+			return Integer.compare(ax, bx);
+		});
+
+		return rows;
+	}
+
+	private void addOptionRows(
+		List<Widget> rows,
+		Set<Widget> seen,
+		Widget[] candidates)
+	{
+		if (candidates == null)
+		{
+			return;
+		}
+
+		for (Widget row : candidates)
+		{
+			if (row == null ||
+				!seen.add(row) ||
+				!renderableTextWidget(row) ||
+				row.getType() != WidgetType.TEXT)
+			{
+				continue;
+			}
+
+			String cleaned = stripTags(row.getText());
+
+			if (!cleaned.isEmpty())
+			{
+				rows.add(row);
+			}
+		}
+	}
+
+	private Widget findOptionTitle(
+		List<Widget> rows)
+	{
+		for (Widget row : rows)
+		{
+			String text =
+				stripTags(row.getText())
+					.toLowerCase(Locale.ROOT);
+
+			if (text.contains("select an option") ||
+				text.contains("choose an option"))
+			{
+				return row;
+			}
+		}
+
+		for (Widget row : rows)
+		{
+			if (!row.hasListener())
+			{
+				return row;
+			}
+		}
+
+		return null;
+	}
+
+	private static boolean isMessageBoxBody(Widget widget)
+	{
+		if (!renderableTextWidget(widget))
+		{
+			return false;
+		}
+
+		String cleaned = stripTags(widget.getText());
+
+		if (cleaned.isEmpty() || isWaitPrompt(cleaned))
+		{
+			return false;
+		}
+
+		String normalized =
+			cleaned.toLowerCase(Locale.ROOT);
+
+		return !normalized.equals("click here to continue") &&
+			!normalized.equals("click to continue") &&
+			!normalized.equals("continue");
 	}
 
 	private static boolean isWaitPrompt(String text)

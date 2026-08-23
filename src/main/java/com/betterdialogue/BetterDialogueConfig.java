@@ -204,8 +204,8 @@ public interface BetterDialogueConfig extends Config
 
 	@ConfigItem(
 		keyName = "replaceSprite",
-		name = "Item / action dialogue",
-		description = "Replace item, object, and action-style dialogue text.",
+		name = "Item / narration dialogue",
+		description = "Replace item, object, action, narrator/environment message-box, and two-item dialogue text.",
 		section = elementsSection,
 		position = 24
 	)
@@ -264,7 +264,7 @@ public interface BetterDialogueConfig extends Config
 	@ConfigItem(
 		keyName = "bodyStyle",
 		name = "Dialogue style",
-		description = "Style for NPC/player/item dialogue text. Inherit uses the style selected in Font.",
+		description = "Style for NPC/player/item/narration dialogue text. Inherit uses the style selected in Font.",
 		position = 41,
 		section = typographySection
 	)
