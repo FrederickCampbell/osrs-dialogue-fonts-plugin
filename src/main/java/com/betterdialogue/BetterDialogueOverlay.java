@@ -854,3 +854,4 @@ public class BetterDialogueOverlay extends Overlay
 			(b.getRGB() & 0xFFFFFF);
 	}
 }
+

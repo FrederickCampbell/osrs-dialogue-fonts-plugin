@@ -1,0 +1,949 @@
+/*
+ * Copyright (c) 2026, theOranguzang
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+package com.betterdialogue;
+
+import java.awt.Color;
+import java.awt.Rectangle;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+import javax.inject.Inject;
+import javax.inject.Singleton;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.widgets.InterfaceID;
+import net.runelite.api.widgets.Widget;
+import net.runelite.api.widgets.WidgetType;
+
+/**
+ * Compatibility-first last-mile dialogue capture.
+ *
+ * Dialogue Fonts+ owns rendering only. Jagex/Quest Helper/other plugins keep
+ * ownership of semantic widget state:
+ * - text is NEVER rewritten
+ * - colors are NEVER rewritten
+ * - listeners/hotkeys are NEVER rewritten
+ * - Quest Helper [1]/[2]/etc. prefixes remain live
+ *
+ * Before native rasterization, only the widget's native font archive ID is
+ * temporarily set to -1. The live text/color/listeners remain untouched.
+ *
+ * A high-priority BeforeRender callback restores those font IDs before other
+ * plugins run; a low-priority callback captures their final state and suppresses
+ * the native font again. This creates a render-only suppression window.
+ */
+@Slf4j
+@Singleton
+public class DialogueWidgetManager
+{
+	private static final int NPC_CHILD_NAME = 4;
+	private static final int NPC_CHILD_STATUS = 5;
+	private static final int NPC_CHILD_TEXT = 6;
+
+	private static final int PLAYER_CHILD_NAME = 4;
+	private static final int PLAYER_CHILD_STATUS = 5;
+	private static final int PLAYER_CHILD_TEXT = 6;
+
+	private static final int SPRITE_CHILD_TEXT = 2;
+
+	private static final int MAX_SCAN_CHILD = 32;
+	private static final int MAX_SCAN_DEPTH = 5;
+
+	private static final Pattern TAG_STRIP =
+		Pattern.compile("<[^>]*>");
+
+	@Inject
+	private Client client;
+
+	@Inject
+	private BetterDialogueConfig config;
+
+	@Inject
+	private DialogueDiagnostics diagnostics;
+
+	private final Map<Widget, Integer> suppressedFontIds =
+		new IdentityHashMap<>();
+
+	public DialogueState captureAndTemporarilySuppress()
+	{
+		// Safety net. Normally the high-priority BeforeRender callback already
+		// restored these before Quest Helper/other plugin handlers ran.
+		restoreSuppressedFontsForPluginLogic();
+
+		Widget npcRoot =
+			client.getWidget(InterfaceID.DIALOG_NPC, 0);
+
+		if (isVisible(npcRoot) && config.replaceNpc())
+		{
+			return buildCharacterState(
+				DialogueType.NPC_DIALOGUE,
+				InterfaceID.DIALOG_NPC,
+				NPC_CHILD_NAME,
+				NPC_CHILD_TEXT,
+				NPC_CHILD_STATUS
+			);
+		}
+
+		Widget playerRoot =
+			client.getWidget(InterfaceID.DIALOG_PLAYER, 0);
+
+		if (isVisible(playerRoot) &&
+			config.replacePlayer())
+		{
+			return buildCharacterState(
+				DialogueType.PLAYER_DIALOGUE,
+				InterfaceID.DIALOG_PLAYER,
+				PLAYER_CHILD_NAME,
+				PLAYER_CHILD_TEXT,
+				PLAYER_CHILD_STATUS
+			);
+		}
+
+		Widget optionContainer =
+			client.getWidget(InterfaceID.DIALOG_OPTION, 1);
+
+		if (isVisible(optionContainer) &&
+			config.replaceOptions())
+		{
+			return buildOptionState(optionContainer);
+		}
+
+		Widget spriteRoot =
+			client.getWidget(InterfaceID.DIALOG_SPRITE, 0);
+
+		if (isVisible(spriteRoot) &&
+			config.replaceSprite())
+		{
+			return buildSpriteState(spriteRoot);
+		}
+
+		return null;
+	}
+
+	public void restoreSuppressedFontsForPluginLogic()
+	{
+		if (suppressedFontIds.isEmpty())
+		{
+			return;
+		}
+
+		for (Map.Entry<Widget, Integer> entry :
+			new ArrayList<>(suppressedFontIds.entrySet()))
+		{
+			try
+			{
+				Widget widget = entry.getKey();
+				int originalFontId = entry.getValue();
+
+				if (widget.getFontId() == -1)
+				{
+					diagnostics.recordFontMutation(
+						"before-plugin-render",
+						"RESTORE_NATIVE_FONT",
+						widget,
+						-1,
+						originalFontId
+					);
+
+					widget.setFontId(originalFontId);
+				}
+			}
+			catch (Exception ex)
+			{
+				log.debug(
+					"Unable to restore dialogue widget font",
+					ex
+				);
+			}
+		}
+
+		suppressedFontIds.clear();
+	}
+
+	public void restoreAll()
+	{
+		restoreSuppressedFontsForPluginLogic();
+	}
+
+	private DialogueState buildCharacterState(
+		DialogueType type,
+		int groupId,
+		int nameChild,
+		int bodyChild,
+		int statusChild)
+	{
+		Widget name =
+			client.getWidget(groupId, nameChild);
+
+		Widget body =
+			client.getWidget(groupId, bodyChild);
+
+		if (!renderableTextWidget(body))
+		{
+			return null;
+		}
+
+		Widget status =
+			findStatusWidget(
+				groupId,
+				statusChild,
+				null
+			);
+
+		String rawBody = body.getText();
+		String rawName =
+			name != null ? name.getText() : null;
+
+		List<TextSegment> segments =
+			parseSegments(
+				rawBody,
+				color(body.getTextColor())
+			);
+
+		if (segments.isEmpty())
+		{
+			return null;
+		}
+
+		String speaker =
+			rawName == null
+				? ""
+				: stripTags(rawName);
+
+		String statusText =
+			status == null ||
+			status.getText() == null
+				? ""
+				: stripTags(status.getText());
+
+		Rectangle bodyBounds = copy(body.getBounds());
+		Rectangle nameBounds =
+			name == null ? null : copy(name.getBounds());
+
+		Rectangle statusBounds =
+			status == null ? null : copy(status.getBounds());
+
+		Color bodyBaseColor =
+			color(body.getTextColor());
+
+		Color nameColor =
+			name == null
+				? new Color(0x800000)
+				: color(name.getTextColor());
+
+		Color statusColor =
+			status == null
+				? new Color(0x0000FF)
+				: color(status.getTextColor());
+
+		String key =
+			type.name() + "|" +
+			speaker + "|" +
+			flattenSegments(segments) + "|" +
+			rectKey(bodyBounds);
+
+		suppressGlyphs(body);
+
+		if (config.replaceNpc() ||
+			config.replacePlayer())
+		{
+			suppressGlyphs(name);
+		}
+
+		if (config.replaceStatus())
+		{
+			suppressGlyphs(status);
+		}
+
+		return new DialogueState(
+			type,
+			speaker,
+			segments,
+			null,
+			statusText,
+			bodyBounds,
+			nameBounds,
+			null,
+			statusBounds,
+			bodyBaseColor,
+			nameColor,
+			null,
+			null,
+			statusColor,
+			key
+		);
+	}
+
+	private DialogueState buildSpriteState(
+		Widget spriteRoot)
+	{
+		Widget body =
+			client.getWidget(
+				InterfaceID.DIALOG_SPRITE,
+				SPRITE_CHILD_TEXT
+			);
+
+		if (!renderableTextWidget(body))
+		{
+			return null;
+		}
+
+		Widget status =
+			findStatusWidget(
+				InterfaceID.DIALOG_SPRITE,
+				-1,
+				spriteRoot
+			);
+
+		List<TextSegment> segments =
+			parseSegments(
+				body.getText(),
+				color(body.getTextColor())
+			);
+
+		if (segments.isEmpty())
+		{
+			return null;
+		}
+
+		Rectangle bodyBounds = copy(body.getBounds());
+
+		String statusText =
+			status == null ||
+			status.getText() == null
+				? ""
+				: stripTags(status.getText());
+
+		String key =
+			DialogueType.SPRITE_DIALOGUE.name() +
+			"|" +
+			flattenSegments(segments) +
+			"|" +
+			rectKey(bodyBounds);
+
+		suppressGlyphs(body);
+
+		if (config.replaceStatus())
+		{
+			suppressGlyphs(status);
+		}
+
+		return new DialogueState(
+			DialogueType.SPRITE_DIALOGUE,
+			"",
+			segments,
+			null,
+			statusText,
+			bodyBounds,
+			null,
+			null,
+			status == null
+				? null
+				: copy(status.getBounds()),
+			color(body.getTextColor()),
+			null,
+			null,
+			null,
+			status == null
+				? new Color(0x0000FF)
+				: color(status.getTextColor()),
+			key
+		);
+	}
+
+	private DialogueState buildOptionState(
+		Widget container)
+	{
+		Widget[] children =
+			container.getDynamicChildren();
+
+		if (children == null ||
+			children.length == 0)
+		{
+			return null;
+		}
+
+		Widget title = children[0];
+
+		String titleText =
+			title == null ||
+			title.getText() == null
+				? ""
+				: stripTags(title.getText());
+
+		Rectangle titleBounds =
+			title == null
+				? null
+				: copy(title.getBounds());
+
+		Color titleColor =
+			title == null
+				? new Color(0x800000)
+				: color(title.getTextColor());
+
+		List<String> options = new ArrayList<>();
+		List<Rectangle> bounds = new ArrayList<>();
+		List<Color> colors = new ArrayList<>();
+		List<Widget> allTextRows = new ArrayList<>();
+
+		Widget waitWidget = null;
+		String waitText = "";
+		Color waitColor = new Color(0x0000FF);
+
+		for (int i = 1; i < children.length; i++)
+		{
+			Widget row = children[i];
+
+			if (!renderableTextWidget(row) ||
+				row.getType() != WidgetType.TEXT)
+			{
+				continue;
+			}
+
+			String raw = row.getText();
+
+			if (raw == null || raw.isEmpty())
+			{
+				continue;
+			}
+
+			String cleaned = stripTags(raw);
+
+			if (cleaned.isEmpty())
+			{
+				continue;
+			}
+
+			allTextRows.add(row);
+
+			if (isWaitPrompt(cleaned))
+			{
+				waitWidget = row;
+				waitText = cleaned;
+				waitColor = color(row.getTextColor());
+				continue;
+			}
+
+			options.add(cleaned);
+			bounds.add(copy(row.getBounds()));
+			colors.add(color(row.getTextColor()));
+		}
+
+		// Jagex can leave stale options in the child array for a fraction of a
+		// second after one row changes to "Please wait...". Suppress the native
+		// font on every row, then render only the real wait state.
+		suppressGlyphs(title);
+
+		for (Widget row : allTextRows)
+		{
+			suppressGlyphs(row);
+		}
+
+		if (waitWidget != null)
+		{
+			return new DialogueState(
+				DialogueType.OPTION_DIALOGUE,
+				"",
+				null,
+				Collections.emptyList(),
+				waitText,
+				null,
+				null,
+				new Rectangle[0],
+				copy(waitWidget.getBounds()),
+				null,
+				null,
+				null,
+				new Color[0],
+				waitColor,
+				DialogueType.OPTION_DIALOGUE.name() +
+					"|WAIT|" + waitText
+			);
+		}
+
+		if (options.isEmpty())
+		{
+			return null;
+		}
+
+		StringBuilder key =
+			new StringBuilder(
+				DialogueType.OPTION_DIALOGUE.name()
+			);
+
+		key.append('|').append(titleText);
+
+		for (String option : options)
+		{
+			key.append('|').append(option);
+		}
+
+		return new DialogueState(
+			DialogueType.OPTION_DIALOGUE,
+			titleText,
+			null,
+			Collections.unmodifiableList(options),
+			"",
+			null,
+			titleBounds,
+			bounds.toArray(new Rectangle[0]),
+			null,
+			null,
+			null,
+			titleColor,
+			colors.toArray(new Color[0]),
+			null,
+			key.toString()
+		);
+	}
+
+	private static boolean isWaitPrompt(String text)
+	{
+		if (text == null)
+		{
+			return false;
+		}
+
+		String normalized =
+			text.trim().toLowerCase(Locale.ROOT);
+
+		return normalized.equals("please wait") ||
+			normalized.equals("please wait...");
+	}
+
+	private void suppressGlyphs(Widget widget)
+	{
+		if (!renderableTextWidget(widget))
+		{
+			return;
+		}
+
+		if (suppressedFontIds.containsKey(widget))
+		{
+			return;
+		}
+
+		int before = widget.getFontId();
+
+		if (before < 0)
+		{
+			return;
+		}
+
+		suppressedFontIds.put(widget, before);
+
+		diagnostics.recordFontMutation(
+			"before-native-render",
+			"SUPPRESS_NATIVE_FONT",
+			widget,
+			before,
+			-1
+		);
+
+		widget.setFontId(-1);
+	}
+
+	private Widget findStatusWidget(
+		int groupId,
+		int fallbackChild,
+		Widget explicitRoot)
+	{
+		Widget fallback =
+			fallbackChild >= 0
+				? client.getWidget(groupId, fallbackChild)
+				: null;
+
+		StatusCandidate best =
+			new StatusCandidate();
+
+		Set<Widget> visited =
+			Collections.newSetFromMap(
+				new IdentityHashMap<>()
+			);
+
+		if (explicitRoot != null)
+		{
+			scanStatus(
+				explicitRoot,
+				0,
+				visited,
+				best
+			);
+		}
+
+		for (int child = 0;
+			child <= MAX_SCAN_CHILD;
+			child++)
+		{
+			Widget widget =
+				client.getWidget(groupId, child);
+
+			scanStatus(
+				widget,
+				0,
+				visited,
+				best
+			);
+		}
+
+		return best.widget != null
+			? best.widget
+			: fallback;
+	}
+
+	private void scanStatus(
+		Widget widget,
+		int depth,
+		Set<Widget> visited,
+		StatusCandidate best)
+	{
+		if (widget == null ||
+			depth > MAX_SCAN_DEPTH ||
+			!visited.add(widget))
+		{
+			return;
+		}
+
+		int score = scoreStatusWidget(widget);
+
+		if (score > best.score)
+		{
+			best.score = score;
+			best.widget = widget;
+		}
+
+		scanStatusChildren(
+			widget.getStaticChildren(),
+			depth,
+			visited,
+			best
+		);
+
+		scanStatusChildren(
+			widget.getDynamicChildren(),
+			depth,
+			visited,
+			best
+		);
+
+		scanStatusChildren(
+			widget.getNestedChildren(),
+			depth,
+			visited,
+			best
+		);
+	}
+
+	private void scanStatusChildren(
+		Widget[] children,
+		int depth,
+		Set<Widget> visited,
+		StatusCandidate best)
+	{
+		if (children == null)
+		{
+			return;
+		}
+
+		for (Widget child : children)
+		{
+			scanStatus(
+				child,
+				depth + 1,
+				visited,
+				best
+			);
+		}
+	}
+
+	private int scoreStatusWidget(Widget widget)
+	{
+		if (!renderableTextWidget(widget))
+		{
+			return 0;
+		}
+
+		String raw = widget.getText();
+
+		if (raw == null || raw.isEmpty())
+		{
+			return 0;
+		}
+
+		String text =
+			stripTags(raw)
+				.toLowerCase(Locale.ROOT);
+
+		int score = 0;
+
+		if (text.contains("click here to continue"))
+		{
+			score = 120;
+		}
+		else if (text.contains("click to continue"))
+		{
+			score = 118;
+		}
+		else if (text.contains("press space") &&
+			text.contains("continue"))
+		{
+			score = 116;
+		}
+		else if (text.contains("spacebar") &&
+			text.contains("continue"))
+		{
+			score = 114;
+		}
+		else if (text.contains("please wait"))
+		{
+			score = 112;
+		}
+		else if (text.equals("continue"))
+		{
+			score = 100;
+		}
+		else if (widget.hasListener() &&
+			widget.getHeight() <= 24)
+		{
+			// Future-proof fallback for other small status strings.
+			score = 50;
+		}
+
+		if (score > 0 && widget.hasListener())
+		{
+			score += 5;
+		}
+
+		return score;
+	}
+
+	private static boolean renderableTextWidget(
+		Widget widget)
+	{
+		return widget != null &&
+			!widget.isHidden();
+	}
+
+	static String stripTags(String text)
+	{
+		if (text == null)
+		{
+			return "";
+		}
+
+		String cleaned = text
+			.replace("<br>", " ")
+			.replace("<lt>", "\uE000")
+			.replace("<gt>", "\uE001");
+
+		cleaned =
+			TAG_STRIP.matcher(cleaned).replaceAll("");
+
+		return cleaned
+			.replace("\uE000", "<")
+			.replace("\uE001", ">")
+			.replaceAll("\\s{2,}", " ")
+			.trim();
+	}
+
+	public List<TextSegment> parseSegments(
+		String raw,
+		Color defaultColor)
+	{
+		List<TextSegment> segments =
+			new ArrayList<>();
+
+		if (raw == null || raw.isEmpty())
+		{
+			return segments;
+		}
+
+		String text = raw
+			.replace("<br>", "\n")
+			.replace("<lt>", "\uE000")
+			.replace("<gt>", "\uE001")
+			.replaceAll("[\\t ]{2,}", " ")
+			.trim();
+
+		Color currentColor = defaultColor;
+		int pos = 0;
+
+		while (pos < text.length())
+		{
+			int tagStart =
+				text.indexOf('<', pos);
+
+			if (tagStart == -1)
+			{
+				appendSegment(
+					segments,
+					restoreAngles(
+						text.substring(pos)
+					),
+					currentColor
+				);
+				break;
+			}
+
+			if (tagStart > pos)
+			{
+				appendSegment(
+					segments,
+					restoreAngles(
+						text.substring(
+							pos,
+							tagStart
+						)
+					),
+					currentColor
+				);
+			}
+
+			int tagEnd =
+				text.indexOf('>', tagStart);
+
+			if (tagEnd == -1)
+			{
+				appendSegment(
+					segments,
+					restoreAngles(
+						text.substring(tagStart)
+					),
+					currentColor
+				);
+				break;
+			}
+
+			String tag =
+				text.substring(
+					tagStart + 1,
+					tagEnd
+				);
+
+			if (tag.startsWith("col="))
+			{
+				try
+				{
+					currentColor =
+						new Color(
+							Integer.parseInt(
+								tag.substring(4),
+								16
+							)
+						);
+				}
+				catch (NumberFormatException ignored)
+				{
+				}
+			}
+			else if ("/col".equals(tag))
+			{
+				currentColor = defaultColor;
+			}
+
+			// Intentionally ignore style tags. Weight/italic come from
+			// Dialogue Fonts+ settings, not game markup.
+			pos = tagEnd + 1;
+		}
+
+		return segments;
+	}
+
+	private static void appendSegment(
+		List<TextSegment> segments,
+		String text,
+		Color color)
+	{
+		if (text != null && !text.isEmpty())
+		{
+			segments.add(
+				new TextSegment(text, color)
+			);
+		}
+	}
+
+	private static String restoreAngles(String text)
+	{
+		return text
+			.replace("\uE000", "<")
+			.replace("\uE001", ">");
+	}
+
+	private static String flattenSegments(
+		List<TextSegment> segments)
+	{
+		StringBuilder out = new StringBuilder();
+
+		for (TextSegment segment : segments)
+		{
+			out.append(segment.getText());
+		}
+
+		return out.toString();
+	}
+
+	private static boolean isVisible(Widget widget)
+	{
+		return widget != null &&
+			!widget.isHidden();
+	}
+
+	private static Color color(int rgb)
+	{
+		return new Color(rgb & 0xFFFFFF);
+	}
+
+	private static Rectangle copy(Rectangle rectangle)
+	{
+		return rectangle == null
+			? null
+			: new Rectangle(rectangle);
+	}
+
+	private static String rectKey(Rectangle rectangle)
+	{
+		if (rectangle == null)
+		{
+			return "null";
+		}
+
+		return rectangle.x + "," +
+			rectangle.y + "," +
+			rectangle.width + "," +
+			rectangle.height;
+	}
+
+	private static final class StatusCandidate
+	{
+		private Widget widget;
+		private int score;
+	}
+}

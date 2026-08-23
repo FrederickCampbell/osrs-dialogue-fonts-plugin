@@ -60,9 +60,9 @@ public class DialogueDiagnostics
 		{
 			Files.createDirectories(logDirectory);
 			String header =
-				"Dialogue Fonts+ diagnostic session\n" +
+				"Dialogue Fonts diagnostic session\n" +
 				"Started: " + LocalDateTime.now().format(TIME) + "\n" +
-				"NOTE: PRE snapshots are captured in BeforeRender after other plugins have mutated dialogue and before Dialogue Fonts+ temporarily suppresses native glyph opacity.\n" +
+				"NOTE: PRE snapshots are captured in BeforeRender after other plugins have mutated dialogue and before Dialogue Fonts temporarily suppresses native glyph opacity.\n" +
 				"Log: " + logFile + "\n" +
 				"============================================================\n";
 			Files.write(
@@ -75,7 +75,7 @@ public class DialogueDiagnostics
 		}
 		catch (IOException ex)
 		{
-			log.warn("Dialogue Fonts+: unable to start diagnostic log {}", logFile, ex);
+			log.warn("Dialogue Fonts: unable to start diagnostic log {}", logFile, ex);
 		}
 	}
 
@@ -427,7 +427,8 @@ public class DialogueDiagnostics
 		}
 		catch (IOException ex)
 		{
-			log.warn("Dialogue Fonts+: failed writing diagnostic log {}", logFile, ex);
+			log.warn("Dialogue Fonts: failed writing diagnostic log {}", logFile, ex);
 		}
 	}
 }
+

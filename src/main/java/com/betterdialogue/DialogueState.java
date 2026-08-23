@@ -57,3 +57,4 @@ public class DialogueState
 
 	private final String dialogueKey;
 }
+

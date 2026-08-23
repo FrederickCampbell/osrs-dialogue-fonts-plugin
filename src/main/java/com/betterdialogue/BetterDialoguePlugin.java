@@ -55,7 +55,7 @@ import net.runelite.client.ui.overlay.OverlayManager;
 public class BetterDialoguePlugin extends Plugin
 {
 	private static final String CONFIG_GROUP =
-		"dialoguefontsplus";
+		"betterdialogue";
 
 	@Inject
 	private OverlayManager overlayManager;
@@ -100,7 +100,7 @@ public class BetterDialoguePlugin extends Plugin
 		overlayManager.add(overlay);
 
 		log.info(
-			"Dialogue Fonts+ v4.4.1 started; diagnostics: {}",
+			"Dialogue Fonts started; diagnostics: {}",
 			diagnostics.getLogFile()
 		);
 	}
@@ -121,13 +121,13 @@ public class BetterDialoguePlugin extends Plugin
 		overlay.setState(null);
 		diagnostics.endSession();
 
-		log.debug("Dialogue Fonts+ v4.4.1 stopped");
+		log.debug("Dialogue Fonts stopped");
 	}
 
 	/**
 	 * Low priority is deliberate. RuneLite invokes higher-priority subscribers
 	 * first, so Quest Helper/other plugins get to mutate text/colors/listeners
-	 * before Dialogue Fonts+ snapshots the final state.
+	 * before Dialogue Fonts snapshots the final state.
 	 */
 	@Subscribe(priority = -1000f)
 	public void onBeforeRender(BeforeRender event)
@@ -170,5 +170,7 @@ public class BetterDialoguePlugin extends Plugin
 		);
 	}
 }
+
+
 
 

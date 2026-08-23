@@ -46,7 +46,7 @@ import net.runelite.api.widgets.WidgetType;
 /**
  * Compatibility-first last-mile dialogue capture.
  *
- * Dialogue Fonts+ owns rendering only. Jagex/Quest Helper/other plugins keep
+ * Dialogue Fonts owns rendering only. Jagex/Quest Helper/other plugins keep
  * ownership of semantic widget state:
  * - text is NEVER rewritten
  * - colors are NEVER rewritten
@@ -870,7 +870,7 @@ public class DialogueWidgetManager
 			}
 
 			// Intentionally ignore style tags. Weight/italic come from
-			// Dialogue Fonts+ settings, not game markup.
+			// Dialogue Fonts settings, not game markup.
 			pos = tagEnd + 1;
 		}
 
@@ -947,3 +947,4 @@ public class DialogueWidgetManager
 		private int score;
 	}
 }
+

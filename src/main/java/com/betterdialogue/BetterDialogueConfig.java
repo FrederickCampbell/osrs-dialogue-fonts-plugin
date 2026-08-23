@@ -34,7 +34,7 @@ import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.FontType;
 import net.runelite.client.config.Range;
 
-@ConfigGroup("dialoguefontsplus")
+@ConfigGroup("betterdialogue")
 public interface BetterDialogueConfig extends Config
 {
 	/*
@@ -81,7 +81,7 @@ public interface BetterDialogueConfig extends Config
 	@ConfigItem(
 		keyName = "respectExternalColors",
 		name = "Preserve plugin colors",
-		description = "Recommended. Dialogue Fonts+ always uses your selected font; Quest Helper/game/plugin colors and option prefixes can still override the base color/content when needed.",
+		description = "Recommended. Dialogue Fonts always uses your selected font; Quest Helper/game/plugin colors and option prefixes can still override the base color/content when needed.",
 		position = 3,
 		section = appearanceSection
 	)
@@ -456,7 +456,7 @@ public interface BetterDialogueConfig extends Config
 	)
 	default boolean diagnosticWidgetLog()
 	{
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
@@ -471,3 +471,5 @@ public interface BetterDialogueConfig extends Config
 		return false;
 	}
 }
+
+

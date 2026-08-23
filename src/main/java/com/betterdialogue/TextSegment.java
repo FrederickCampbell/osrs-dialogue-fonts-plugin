@@ -39,3 +39,4 @@ public class TextSegment
 	private final Color color;
 }
 
+

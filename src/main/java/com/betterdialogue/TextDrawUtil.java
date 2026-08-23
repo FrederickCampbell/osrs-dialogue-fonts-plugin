@@ -98,3 +98,4 @@ public final class TextDrawUtil
 		g.drawString(text, x, baselineY);
 	}
 }
+
