@@ -39,7 +39,7 @@ import net.runelite.client.ui.overlay.OverlayManager;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Better Dialogue Boxes",
+	name = "Dialogue Fonts",
 	description = "Compatibility-first custom TrueType OSRS dialogue with Quest Helper preservation and overflow scrolling",
 	tags = {
 		"dialogue",
@@ -170,4 +170,5 @@ public class BetterDialoguePlugin extends Plugin
 		);
 	}
 }
+
 

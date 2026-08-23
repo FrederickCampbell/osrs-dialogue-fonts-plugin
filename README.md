@@ -1,40 +1,32 @@
-# Better Dialogue Boxes
+# Dialogue Fonts
 
-A RuneLite plugin that replaces native OSRS dialogue glyphs with configurable
-TrueType rendering while preserving the live game and plugin semantics.
+Customizable TrueType rendering for native Old School RuneScape dialogue.
 
 ## Features
 
-- RuneLite native font picker with installed system fonts and `~/.runelite/fonts`
-- per-element font style, color, outline, shadow, and smoothing controls
-- NPC, player, item/action, option, continue, press-space, and wait text
-- Quest Helper-aware option rendering that preserves prefixes, colors, listeners,
-  and hotkeys while using Better Dialogue Boxes typography
-- adaptive dialogue wrapping for custom font sizes
-- safe overflow scrolling with an OSRS-like scrollbar
-- click / number-key choice confirmation feedback
-- de-spammed diagnostic widget logging for unusual dialogue states
+- RuneLite font picker with installed system fonts and `~/.runelite/fonts`
+- configurable NPC/player dialogue, speaker, option, and status typography
+- Quest Helper-compatible option rendering: prefixes, semantic colors, hotkeys,
+  and listeners remain owned by Quest Helper while Dialogue Fonts owns typography
+- `Click here to continue`, space-to-continue, and `Please wait...` rendering
+- configurable colors, styles, smoothing, outline, shadow, and line spacing
+- adaptive wrapping for custom font sizes
+- overflow scrolling with an OSRS-like scrollbar
+- click and number-key option confirmation feedback
+- low-noise diagnostics for unusual dialogue widget states
 
-## Compatibility model
+## Compatibility
 
-Better Dialogue Boxes owns **typography and rendering**.
-
-Jagex, Quest Helper, and other plugins keep ownership of the underlying text,
-choice prefixes, semantic colors, listeners, and hotkeys. The plugin snapshots
-their final state immediately before native rendering and redraws it using the
-selected TrueType font.
-
-The internal Java package and existing RuneLite config group intentionally keep
-their historical names so upgrades do not reset existing settings.
+Dialogue Fonts is deliberately a last-mile renderer. The live widget text,
+colors, listeners, and choice semantics remain available to Jagex and other
+RuneLite plugins. The native bitmap font is suppressed only for rasterization,
+then the captured final state is rendered with the selected TrueType font.
 
 ## Credits
 
-Originally based on
-[`theOranguzang/osrs-dialogue-fonts-plugin`](https://github.com/theOranguzang/osrs-dialogue-fonts-plugin).
+Original plugin: **theOranguzang**
 
-Original Dialogue Fonts work: **theOranguzang**
-
-Better Dialogue Boxes fork and extended renderer: **Frederick Campbell**
+Extended renderer and compatibility work: **Frederick Campbell**
 
 ## License
 
