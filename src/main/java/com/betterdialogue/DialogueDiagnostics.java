@@ -155,6 +155,7 @@ public class DialogueDiagnostics
 
 
 
+
 	public synchronized void recordMesboxEvent(
 		String message)
 	{
@@ -165,6 +166,44 @@ public class DialogueDiagnostics
 
 		ensureSession();
 
+		StringBuilder out =
+			new StringBuilder();
+
+		out.append("\n[")
+			.append(now())
+			.append("] MESBOX EVENT text=\"")
+			.append(escape(message))
+			.append("\"\n");
+
+		Widget layer =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_LAYER
+			);
+
+		if (layer == null)
+		{
+			out.append("MES_LAYER: null\n");
+		}
+		else
+		{
+			out.append(
+				"--- MES_LAYER AT EVENT ---\n"
+			);
+
+			Set<Widget> visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
+
+			appendWidgetRecursive(
+				out,
+				layer,
+				"MES_LAYER",
+				0,
+				visited
+			);
+		}
+
 		Widget first =
 			client.getWidget(
 				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
@@ -174,15 +213,6 @@ public class DialogueDiagnostics
 			client.getWidget(
 				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
 			);
-
-		StringBuilder out =
-			new StringBuilder();
-
-		out.append("\n[")
-			.append(now())
-			.append("] MESBOX EVENT text=\"")
-			.append(escape(message))
-			.append("\"\n");
 
 		out.append("MES_TEXT: ")
 			.append(
@@ -357,6 +387,8 @@ public class DialogueDiagnostics
 		{
 			appendUnknownContinueDialogue(out);
 		}
+
+		appendV7MesLayerSnapshot(out);
 
 		return out.toString();
 	}
@@ -741,6 +773,116 @@ public class DialogueDiagnostics
 				)
 			).append('\n');
 		}
+	}
+
+
+	private void appendV7MesLayerSnapshot(
+		StringBuilder out)
+	{
+		Widget layer =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_LAYER
+			);
+
+		if (layer == null)
+		{
+			return;
+		}
+
+		Set<Widget> probeVisited =
+			Collections.newSetFromMap(
+				new IdentityHashMap<>()
+			);
+
+		if (!v7LayerHasText(
+			layer,
+			0,
+			probeVisited))
+		{
+			return;
+		}
+
+		out.append(
+			"\n--- MES_LAYER LIVE TREE ---\n"
+		);
+
+		Set<Widget> visited =
+			Collections.newSetFromMap(
+				new IdentityHashMap<>()
+			);
+
+		appendWidgetRecursive(
+			out,
+			layer,
+			"MES_LAYER",
+			0,
+			visited
+		);
+	}
+
+	private boolean v7LayerHasText(
+		Widget widget,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (widget == null ||
+			depth > MAX_DEPTH + 8 ||
+			!visited.add(widget))
+		{
+			return false;
+		}
+
+		if (widget.getType() == WidgetType.TEXT &&
+			widget.getText() != null &&
+			!widget.getText().trim().isEmpty())
+		{
+			return true;
+		}
+
+		return v7ChildrenHaveText(
+				widget.getChildren(),
+				depth,
+				visited
+			) ||
+			v7ChildrenHaveText(
+				widget.getStaticChildren(),
+				depth,
+				visited
+			) ||
+			v7ChildrenHaveText(
+				widget.getDynamicChildren(),
+				depth,
+				visited
+			) ||
+			v7ChildrenHaveText(
+				widget.getNestedChildren(),
+				depth,
+				visited
+			);
+	}
+
+	private boolean v7ChildrenHaveText(
+		Widget[] children,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (children == null)
+		{
+			return false;
+		}
+
+		for (Widget child : children)
+		{
+			if (v7LayerHasText(
+				child,
+				depth + 1,
+				visited))
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 }
 

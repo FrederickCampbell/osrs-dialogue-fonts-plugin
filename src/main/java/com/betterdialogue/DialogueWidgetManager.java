@@ -369,6 +369,7 @@ public class DialogueWidgetManager
 	}
 
 
+
 	private DialogueState buildMesboxState()
 	{
 		if (lastMesboxText.isEmpty())
@@ -376,51 +377,93 @@ public class DialogueWidgetManager
 			return null;
 		}
 
-		Widget first =
+		Widget messageLayer =
 			client.getWidget(
-				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
-			);
-
-		Widget second =
-			client.getWidget(
-				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_LAYER
 			);
 
 		Widget body = null;
 
-		if (v6MesboxMatches(first, lastMesboxText))
+		if (messageLayer != null)
 		{
-			body = first;
-		}
-		else if (v6MesboxMatches(second, lastMesboxText))
-		{
-			body = second;
-		}
-		else if (v6UsableMesboxBody(first))
-		{
-			body = first;
-		}
-		else if (v6UsableMesboxBody(second))
-		{
-			body = second;
+			Set<Widget> visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
+
+			body =
+				v7FindMesboxText(
+					messageLayer,
+					lastMesboxText,
+					0,
+					visited
+				);
 		}
 
+		// Legacy/fallback path. The log showed these empty for Kovac,
+		// but they are still valid for some classic message-layer cases.
 		if (body == null)
+		{
+			Widget first =
+				client.getWidget(
+					net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
+				);
+
+			Widget second =
+				client.getWidget(
+					net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
+				);
+
+			if (v7MesboxMatches(
+				first,
+				lastMesboxText))
+			{
+				body = first;
+			}
+			else if (v7MesboxMatches(
+				second,
+				lastMesboxText))
+			{
+				body = second;
+			}
+		}
+
+		if (body == null ||
+			!renderableTextWidget(body))
 		{
 			return null;
 		}
 
-		int groupId = body.getId() >>> 16;
+		Widget status = null;
 
-		Widget root =
-			client.getWidget(groupId, 0);
+		if (messageLayer != null)
+		{
+			Set<Widget> visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
 
-		Widget status =
-			findStatusWidget(
-				groupId,
-				-1,
-				root
-			);
+			status =
+				v7FindStatus(
+					messageLayer,
+					0,
+					visited,
+					body
+				);
+		}
+
+		if (status == null)
+		{
+			int groupId =
+				body.getId() >>> 16;
+
+			status =
+				findStatusWidget(
+					groupId,
+					-1,
+					messageLayer
+				);
+		}
 
 		if (status == body)
 		{
@@ -1486,6 +1529,285 @@ public class DialogueWidgetManager
 	}
 
 	private static String v6NormalizeMesbox(
+		String raw)
+	{
+		if (raw == null)
+		{
+			return "";
+		}
+
+		String withBreakSpaces =
+			raw.replaceAll(
+				"(?i)<br\\s*/?>",
+				" "
+			);
+
+		return stripTags(withBreakSpaces)
+			.replace('\u00A0', ' ')
+			.replaceAll("\\s+", " ")
+			.trim();
+	}
+
+
+	private Widget v7FindMesboxText(
+		Widget widget,
+		String expected,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (widget == null ||
+			depth > MAX_SCAN_DEPTH + 8 ||
+			!visited.add(widget))
+		{
+			return null;
+		}
+
+		if (v7MesboxMatches(
+			widget,
+			expected))
+		{
+			return widget;
+		}
+
+		Widget found =
+			v7FindMesboxTextInChildren(
+				widget.getChildren(),
+				expected,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			v7FindMesboxTextInChildren(
+				widget.getStaticChildren(),
+				expected,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			v7FindMesboxTextInChildren(
+				widget.getDynamicChildren(),
+				expected,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		return v7FindMesboxTextInChildren(
+			widget.getNestedChildren(),
+			expected,
+			depth,
+			visited
+		);
+	}
+
+	private Widget v7FindMesboxTextInChildren(
+		Widget[] children,
+		String expected,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (children == null)
+		{
+			return null;
+		}
+
+		for (Widget child : children)
+		{
+			Widget found =
+				v7FindMesboxText(
+					child,
+					expected,
+					depth + 1,
+					visited
+				);
+
+			if (found != null)
+			{
+				return found;
+			}
+		}
+
+		return null;
+	}
+
+	private static boolean v7MesboxMatches(
+		Widget widget,
+		String expected)
+	{
+		if (widget == null ||
+			widget.getType() != WidgetType.TEXT ||
+			widget.getText() == null)
+		{
+			return false;
+		}
+
+		String actual =
+			v7Normalize(
+				widget.getText()
+			);
+
+		String wanted =
+			v7Normalize(expected);
+
+		if (actual.isEmpty() ||
+			wanted.isEmpty() ||
+			v7StatusText(actual))
+		{
+			return false;
+		}
+
+		if (actual.equals(wanted))
+		{
+			return true;
+		}
+
+		int shorter =
+			Math.min(
+				actual.length(),
+				wanted.length()
+			);
+
+		return shorter >= 10 &&
+			(actual.contains(wanted) ||
+			 wanted.contains(actual));
+	}
+
+	private Widget v7FindStatus(
+		Widget widget,
+		int depth,
+		Set<Widget> visited,
+		Widget body)
+	{
+		if (widget == null ||
+			depth > MAX_SCAN_DEPTH + 8 ||
+			!visited.add(widget))
+		{
+			return null;
+		}
+
+		if (widget != body &&
+			widget.getType() == WidgetType.TEXT &&
+			widget.getText() != null &&
+			v7StatusText(widget.getText()) &&
+			renderableTextWidget(widget))
+		{
+			return widget;
+		}
+
+		Widget found =
+			v7FindStatusInChildren(
+				widget.getChildren(),
+				depth,
+				visited,
+				body
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			v7FindStatusInChildren(
+				widget.getStaticChildren(),
+				depth,
+				visited,
+				body
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			v7FindStatusInChildren(
+				widget.getDynamicChildren(),
+				depth,
+				visited,
+				body
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		return v7FindStatusInChildren(
+			widget.getNestedChildren(),
+			depth,
+			visited,
+			body
+		);
+	}
+
+	private Widget v7FindStatusInChildren(
+		Widget[] children,
+		int depth,
+		Set<Widget> visited,
+		Widget body)
+	{
+		if (children == null)
+		{
+			return null;
+		}
+
+		for (Widget child : children)
+		{
+			Widget found =
+				v7FindStatus(
+					child,
+					depth + 1,
+					visited,
+					body
+				);
+
+			if (found != null)
+			{
+				return found;
+			}
+		}
+
+		return null;
+	}
+
+	private static boolean v7StatusText(
+		String raw)
+	{
+		String text =
+			v7Normalize(raw)
+				.toLowerCase(Locale.ROOT);
+
+		return text.contains(
+				"click here to continue"
+			) ||
+			text.contains(
+				"click to continue"
+			) ||
+			(text.contains("press space") &&
+			 text.contains("continue")) ||
+			(text.contains("spacebar") &&
+			 text.contains("continue")) ||
+			text.contains("please wait");
+	}
+
+	private static String v7Normalize(
 		String raw)
 	{
 		if (raw == null)
