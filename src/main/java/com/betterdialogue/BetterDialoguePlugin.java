@@ -68,8 +68,6 @@ public class BetterDialoguePlugin extends Plugin
 	@Inject
 	private DialogueWidgetManager widgetManager;
 
-	@Inject
-	private DialogueDiagnostics diagnostics;
 
 	@Inject
 	private DialogueScrollController scrollController;
@@ -85,7 +83,6 @@ public class BetterDialoguePlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		diagnostics.startSession();
 
 		// PluginManager registers @Subscribe methods only AFTER startUp().
 		// A second annotated BeforeRender method is illegal because RuneLite
@@ -101,10 +98,7 @@ public class BetterDialoguePlugin extends Plugin
 		optionSelectionFeedback.startUp();
 		overlayManager.add(overlay);
 
-		log.info(
-			"Dialogue Fonts started; diagnostics: {}",
-			diagnostics.getLogFile()
-		);
+		log.debug("Dialogue Fonts started");
 	}
 
 	@Override
@@ -121,7 +115,6 @@ public class BetterDialoguePlugin extends Plugin
 		scrollController.shutDown();
 		optionSelectionFeedback.shutDown();
 		overlay.setState(null);
-		diagnostics.endSession();
 
 		log.debug("Dialogue Fonts stopped");
 	}
@@ -134,7 +127,6 @@ public class BetterDialoguePlugin extends Plugin
 	@Subscribe(priority = -1000f)
 	public void onBeforeRender(BeforeRender event)
 	{
-		diagnostics.capturePreMutation();
 
 		DialogueState state =
 			widgetManager.captureAndTemporarilySuppress();
@@ -148,7 +140,7 @@ public class BetterDialoguePlugin extends Plugin
 		if (event.getType() == ChatMessageType.MESBOX)
 		{
 			widgetManager.onMesbox(event.getMessage());
-			diagnostics.recordMesboxEvent(event.getMessage());
+
 		}
 		else if (event.getType() == ChatMessageType.DIALOG)
 		{

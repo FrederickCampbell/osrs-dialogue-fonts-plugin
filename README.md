@@ -13,7 +13,7 @@ Customizable TrueType rendering for native Old School RuneScape dialogue.
 - adaptive wrapping for custom font sizes
 - overflow scrolling with an OSRS-like scrollbar
 - click and number-key option confirmation feedback
-- low-noise diagnostics for unusual dialogue widget states
+
 
 ## Compatibility
 

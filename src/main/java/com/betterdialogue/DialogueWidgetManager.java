@@ -76,7 +76,7 @@ public class DialogueWidgetManager
 	private static final int SPRITE_CHILD_TEXT = 2;
 	private static final int DOUBLE_SPRITE_CHILD_TEXT = 2;
 
-	private static final int MAX_SCAN_CHILD = 96;
+
 	private static final int MAX_SCAN_DEPTH = 5;
 
 	private static final Pattern TAG_STRIP =
@@ -88,8 +88,6 @@ public class DialogueWidgetManager
 	@Inject
 	private BetterDialogueConfig config;
 
-	@Inject
-	private DialogueDiagnostics diagnostics;
 
 	private final Map<Widget, Integer> suppressedFontIds =
 		new IdentityHashMap<>();
@@ -193,13 +191,6 @@ public class DialogueWidgetManager
 
 				if (widget.getFontId() == -1)
 				{
-					diagnostics.recordFontMutation(
-						"before-plugin-render",
-						"RESTORE_NATIVE_FONT",
-						widget,
-						-1,
-						originalFontId
-					);
 
 					widget.setFontId(originalFontId);
 				}
@@ -841,13 +832,6 @@ public class DialogueWidgetManager
 
 		suppressedFontIds.put(widget, before);
 
-		diagnostics.recordFontMutation(
-			"before-native-render",
-			"SUPPRESS_NATIVE_FONT",
-			widget,
-			before,
-			-1
-		);
 
 		widget.setFontId(-1);
 	}
@@ -862,6 +846,22 @@ public class DialogueWidgetManager
 				? client.getWidget(groupId, fallbackChild)
 				: null;
 
+		/*
+		 * NPC/player dialogue has a stable, known status child. Use it directly
+		 * instead of walking the whole interface on every render.
+		 */
+		if (explicitRoot == null)
+		{
+			return renderableTextWidget(fallback)
+				? fallback
+				: null;
+		}
+
+		/*
+		 * Sprite variants can expose the continue row as a dynamic/nested child.
+		 * Search only that dialogue's own small subtree; never scan unrelated
+		 * top-level children or widget roots.
+		 */
 		StatusCandidate best =
 			new StatusCandidate();
 
@@ -870,34 +870,18 @@ public class DialogueWidgetManager
 				new IdentityHashMap<>()
 			);
 
-		if (explicitRoot != null)
-		{
-			scanStatus(
-				explicitRoot,
-				0,
-				visited,
-				best
-			);
-		}
-
-		for (int child = 0;
-			child <= MAX_SCAN_CHILD;
-			child++)
-		{
-			Widget widget =
-				client.getWidget(groupId, child);
-
-			scanStatus(
-				widget,
-				0,
-				visited,
-				best
-			);
-		}
+		scanStatus(
+			explicitRoot,
+			0,
+			visited,
+			best
+		);
 
 		return best.widget != null
 			? best.widget
-			: fallback;
+			: (renderableTextWidget(fallback)
+				? fallback
+				: null);
 	}
 
 	private void scanStatus(

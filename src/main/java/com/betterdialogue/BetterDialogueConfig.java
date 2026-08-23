@@ -435,41 +435,7 @@ public interface BetterDialogueConfig extends Config
 		return 24;
 	}
 
-	// ---------------------------------------------------------------------
-	// DIAGNOSTICS — hidden from normal users unless debugging
-	// ---------------------------------------------------------------------
 
-	@ConfigSection(
-		name = "Diagnostics",
-		description = "Logging for debugging unusual dialogue states.",
-		position = 70,
-		closedByDefault = true
-	)
-	String diagnosticsSection = "diagnosticsSection";
-
-	@ConfigItem(
-		keyName = "diagnosticWidgetLog",
-		name = "Widget-state log",
-		description = "Log dialogue/widget snapshots when the state actually changes.",
-		section = diagnosticsSection,
-		position = 71
-	)
-	default boolean diagnosticWidgetLog()
-	{
-		return false;
-	}
-
-	@ConfigItem(
-		keyName = "verboseMutationLog",
-		name = "Verbose renderer log",
-		description = "Developer-only. Log every temporary per-frame renderer mutation. Leave OFF unless diagnosing timing.",
-		section = diagnosticsSection,
-		position = 72
-	)
-	default boolean verboseMutationLog()
-	{
-		return false;
-	}
 }
 
 
