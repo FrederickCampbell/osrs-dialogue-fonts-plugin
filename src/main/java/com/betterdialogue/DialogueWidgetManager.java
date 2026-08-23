@@ -370,6 +370,7 @@ public class DialogueWidgetManager
 
 
 
+
 	private DialogueState buildMesboxState()
 	{
 		if (lastMesboxText.isEmpty())
@@ -377,91 +378,29 @@ public class DialogueWidgetManager
 			return null;
 		}
 
-		Widget messageLayer =
-			client.getWidget(
-				net.runelite.api.gameval.InterfaceID.Chatbox.MES_LAYER
+		Widget body =
+			v8FindChatboxText(
+				lastMesboxText,
+				false
 			);
 
-		Widget body = null;
-
-		if (messageLayer != null)
-		{
-			Set<Widget> visited =
-				Collections.newSetFromMap(
-					new IdentityHashMap<>()
-				);
-
-			body =
-				v7FindMesboxText(
-					messageLayer,
-					lastMesboxText,
-					0,
-					visited
-				);
-		}
-
-		// Legacy/fallback path. The log showed these empty for Kovac,
-		// but they are still valid for some classic message-layer cases.
 		if (body == null)
-		{
-			Widget first =
-				client.getWidget(
-					net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
-				);
-
-			Widget second =
-				client.getWidget(
-					net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
-				);
-
-			if (v7MesboxMatches(
-				first,
-				lastMesboxText))
-			{
-				body = first;
-			}
-			else if (v7MesboxMatches(
-				second,
-				lastMesboxText))
-			{
-				body = second;
-			}
-		}
-
-		if (body == null ||
-			!renderableTextWidget(body))
 		{
 			return null;
 		}
 
-		Widget status = null;
-
-		if (messageLayer != null)
-		{
-			Set<Widget> visited =
-				Collections.newSetFromMap(
-					new IdentityHashMap<>()
-				);
-
-			status =
-				v7FindStatus(
-					messageLayer,
-					0,
-					visited,
-					body
-				);
-		}
+		Widget status =
+			v8FindChatboxText(
+				"Click here to continue",
+				true
+			);
 
 		if (status == null)
 		{
-			int groupId =
-				body.getId() >>> 16;
-
 			status =
-				findStatusWidget(
-					groupId,
-					-1,
-					messageLayer
+				v8FindChatboxText(
+					"Please wait...",
+					true
 				);
 		}
 
@@ -1808,6 +1747,247 @@ public class DialogueWidgetManager
 	}
 
 	private static String v7Normalize(
+		String raw)
+	{
+		if (raw == null)
+		{
+			return "";
+		}
+
+		String withBreakSpaces =
+			raw.replaceAll(
+				"(?i)<br\\s*/?>",
+				" "
+			);
+
+		return stripTags(withBreakSpaces)
+			.replace('\u00A0', ' ')
+			.replaceAll("\\s+", " ")
+			.trim();
+	}
+
+
+	private Widget v8FindChatboxText(
+		String expected,
+		boolean exactStatus)
+	{
+		Widget hiddenFallback = null;
+
+		for (int child = 0;
+			child < MAX_SCAN_CHILD + 64;
+			child++)
+		{
+			Widget top =
+				client.getWidget(
+					net.runelite.api.widgets.WidgetID.CHATBOX_GROUP_ID,
+					child
+				);
+
+			if (top == null)
+			{
+				continue;
+			}
+
+			Set<Widget> visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
+
+			Widget visible =
+				v8FindMatchingTextRecursive(
+					top,
+					expected,
+					exactStatus,
+					true,
+					0,
+					visited
+				);
+
+			if (visible != null)
+			{
+				return visible;
+			}
+
+			if (hiddenFallback == null)
+			{
+				visited =
+					Collections.newSetFromMap(
+						new IdentityHashMap<>()
+					);
+
+				hiddenFallback =
+					v8FindMatchingTextRecursive(
+						top,
+						expected,
+						exactStatus,
+						false,
+						0,
+						visited
+					);
+			}
+		}
+
+		return hiddenFallback;
+	}
+
+	private Widget v8FindMatchingTextRecursive(
+		Widget widget,
+		String expected,
+		boolean exactStatus,
+		boolean requireVisible,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (widget == null ||
+			depth > MAX_SCAN_DEPTH + 10 ||
+			!visited.add(widget))
+		{
+			return null;
+		}
+
+		if (widget.getType() == WidgetType.TEXT &&
+			widget.getText() != null &&
+			(!requireVisible ||
+			 renderableTextWidget(widget)))
+		{
+			String actual =
+				v8Normalize(
+					widget.getText()
+				);
+
+			String wanted =
+				v8Normalize(expected);
+
+			boolean match =
+				exactStatus
+					? actual.equalsIgnoreCase(wanted)
+					: v8BodyTextMatches(
+						actual,
+						wanted
+					);
+
+			if (match)
+			{
+				return widget;
+			}
+		}
+
+		Widget found =
+			v8FindInChildren(
+				widget.getChildren(),
+				expected,
+				exactStatus,
+				requireVisible,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			v8FindInChildren(
+				widget.getStaticChildren(),
+				expected,
+				exactStatus,
+				requireVisible,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			v8FindInChildren(
+				widget.getDynamicChildren(),
+				expected,
+				exactStatus,
+				requireVisible,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		return v8FindInChildren(
+			widget.getNestedChildren(),
+			expected,
+			exactStatus,
+			requireVisible,
+			depth,
+			visited
+		);
+	}
+
+	private Widget v8FindInChildren(
+		Widget[] children,
+		String expected,
+		boolean exactStatus,
+		boolean requireVisible,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (children == null)
+		{
+			return null;
+		}
+
+		for (Widget child : children)
+		{
+			Widget found =
+				v8FindMatchingTextRecursive(
+					child,
+					expected,
+					exactStatus,
+					requireVisible,
+					depth + 1,
+					visited
+				);
+
+			if (found != null)
+			{
+				return found;
+			}
+		}
+
+		return null;
+	}
+
+	private static boolean v8BodyTextMatches(
+		String actual,
+		String wanted)
+	{
+		if (actual.isEmpty() ||
+			wanted.isEmpty())
+		{
+			return false;
+		}
+
+		if (actual.equals(wanted))
+		{
+			return true;
+		}
+
+		int shorter =
+			Math.min(
+				actual.length(),
+				wanted.length()
+			);
+
+		return shorter >= 10 &&
+			(actual.contains(wanted) ||
+			 wanted.contains(actual));
+	}
+
+	private static String v8Normalize(
 		String raw)
 	{
 		if (raw == null)
