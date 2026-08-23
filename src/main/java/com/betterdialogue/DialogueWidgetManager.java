@@ -368,6 +368,7 @@ public class DialogueWidgetManager
 		lastMesboxText = "";
 	}
 
+
 	private DialogueState buildMesboxState()
 	{
 		if (lastMesboxText.isEmpty())
@@ -375,71 +376,112 @@ public class DialogueWidgetManager
 			return null;
 		}
 
-		Widget[] roots = client.getWidgetRoots();
+		Widget first =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
+			);
 
-		if (roots == null)
+		Widget second =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
+			);
+
+		Widget body = null;
+
+		if (v6MesboxMatches(first, lastMesboxText))
+		{
+			body = first;
+		}
+		else if (v6MesboxMatches(second, lastMesboxText))
+		{
+			body = second;
+		}
+		else if (v6UsableMesboxBody(first))
+		{
+			body = first;
+		}
+		else if (v6UsableMesboxBody(second))
+		{
+			body = second;
+		}
+
+		if (body == null)
 		{
 			return null;
 		}
 
-		for (Widget root : roots)
+		int groupId = body.getId() >>> 16;
+
+		Widget root =
+			client.getWidget(groupId, 0);
+
+		Widget status =
+			findStatusWidget(
+				groupId,
+				-1,
+				root
+			);
+
+		if (status == body)
 		{
-			if (root == null || root.isHidden())
-			{
-				continue;
-			}
-
-			Set<Widget> visited =
-				Collections.newSetFromMap(
-					new IdentityHashMap<>()
-				);
-
-			Widget body =
-				findMesboxBody(
-					root,
-					lastMesboxText,
-					0,
-					visited
-				);
-
-			if (body == null)
-			{
-				continue;
-			}
-
-			StatusCandidate statusCandidate =
-				new StatusCandidate();
-
-			visited =
-				Collections.newSetFromMap(
-					new IdentityHashMap<>()
-				);
-
-			scanStatus(
-				root,
-				0,
-				visited,
-				statusCandidate
-			);
-
-			Widget status =
-				statusCandidate.score >= 100
-					? statusCandidate.widget
-					: null;
-
-			if (status == body)
-			{
-				status = null;
-			}
-
-			return buildTextOnlyWidgetState(
-				DialogueType.MESSAGE_BOX,
-				body,
-				status
-			);
+			status = null;
 		}
 
-		return null;
+		List<TextSegment> segments =
+			parseSegments(
+				body.getText(),
+				color(body.getTextColor())
+			);
+
+		if (segments.isEmpty())
+		{
+			return null;
+		}
+
+		Rectangle bodyBounds =
+			copy(body.getBounds());
+
+		String statusText =
+			status == null ||
+			status.getText() == null
+				? ""
+				: stripTags(status.getText());
+
+		String key =
+			DialogueType.MESSAGE_BOX.name() +
+			"|" +
+			flattenSegments(segments) +
+			"|" +
+			rectKey(bodyBounds);
+
+		suppressGlyphs(body);
+
+		if (config.replaceStatus())
+		{
+			suppressGlyphs(status);
+		}
+
+		return new DialogueState(
+			DialogueType.MESSAGE_BOX,
+			"",
+			segments,
+			null,
+			statusText,
+			bodyBounds,
+			null,
+			null,
+			status == null
+				? null
+				: copy(status.getBounds()),
+			color(body.getTextColor()),
+			null,
+			null,
+			null,
+			status == null
+				? new Color(0x0000FF)
+				: color(status.getTextColor()),
+			key
+		);
 	}
 
 	private Widget findMesboxBody(
@@ -1364,6 +1406,103 @@ public class DialogueWidgetManager
 	{
 		private Widget widget;
 		private int score;
+	}
+
+
+	private static boolean v6MesboxMatches(
+		Widget widget,
+		String expected)
+	{
+		if (!renderableTextWidget(widget))
+		{
+			return false;
+		}
+
+		String actual =
+			v6NormalizeMesbox(
+				widget.getText()
+			);
+
+		String wanted =
+			v6NormalizeMesbox(expected);
+
+		if (actual.isEmpty() ||
+			wanted.isEmpty())
+		{
+			return false;
+		}
+
+		if (actual.equals(wanted))
+		{
+			return true;
+		}
+
+		int shorter =
+			Math.min(
+				actual.length(),
+				wanted.length()
+			);
+
+		return shorter >= 12 &&
+			(actual.contains(wanted) ||
+			 wanted.contains(actual));
+	}
+
+	private static boolean v6UsableMesboxBody(
+		Widget widget)
+	{
+		if (!renderableTextWidget(widget))
+		{
+			return false;
+		}
+
+		String text =
+			v6NormalizeMesbox(
+				widget.getText()
+			);
+
+		return !text.isEmpty() &&
+			!v6StatusText(text);
+	}
+
+	private static boolean v6StatusText(
+		String raw)
+	{
+		String text =
+			v6NormalizeMesbox(raw)
+				.toLowerCase(Locale.ROOT);
+
+		return text.contains(
+				"click here to continue"
+			) ||
+			text.contains(
+				"click to continue"
+			) ||
+			(text.contains("press space") &&
+			 text.contains("continue")) ||
+			(text.contains("spacebar") &&
+			 text.contains("continue")) ||
+			text.contains("please wait");
+	}
+
+	private static String v6NormalizeMesbox(
+		String raw)
+	{
+		if (raw == null)
+		{
+			return "";
+		}
+
+		String withBreakSpaces =
+			raw.replaceAll(
+				"(?i)<br\\s*/?>",
+				" "
+			);
+
+		return stripTags(withBreakSpaces)
+			.replace('\u00A0', ' ')
+			.replaceAll("\\s+", " ")
+			.trim();
 	}
 }
 

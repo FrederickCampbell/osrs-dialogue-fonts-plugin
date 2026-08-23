@@ -154,6 +154,7 @@ public class DialogueDiagnostics
 	}
 
 
+
 	public synchronized void recordMesboxEvent(
 		String message)
 	{
@@ -164,10 +165,48 @@ public class DialogueDiagnostics
 
 		ensureSession();
 
-		append(
-			"\n[" + now() + "] MESBOX EVENT text=\"" +
-				escape(message) + "\"\n"
-		);
+		Widget first =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
+			);
+
+		Widget second =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
+			);
+
+		StringBuilder out =
+			new StringBuilder();
+
+		out.append("\n[")
+			.append(now())
+			.append("] MESBOX EVENT text=\"")
+			.append(escape(message))
+			.append("\"\n");
+
+		out.append("MES_TEXT: ")
+			.append(
+				first == null
+					? "null"
+					: describeWidget(
+						"MES_TEXT",
+						first
+					)
+			)
+			.append('\n');
+
+		out.append("MES_TEXT2: ")
+			.append(
+				second == null
+					? "null"
+					: describeWidget(
+						"MES_TEXT2",
+						second
+					)
+			)
+			.append('\n');
+
+		append(out.toString());
 	}
 
 	public synchronized void recordTextMutation(
@@ -311,6 +350,8 @@ public class DialogueDiagnostics
 			WidgetID.QUEST_COMPLETED_GROUP_ID,
 			0
 		);
+
+		appendV6NativeMesboxSnapshot(out);
 
 		if (out.length() == 0)
 		{
@@ -642,6 +683,63 @@ public class DialogueDiagnostics
 		catch (IOException ex)
 		{
 			log.warn("Dialogue Fonts: failed writing diagnostic log {}", logFile, ex);
+		}
+	}
+
+
+	private void appendV6NativeMesboxSnapshot(
+		StringBuilder out)
+	{
+		Widget first =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
+			);
+
+		Widget second =
+			client.getWidget(
+				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
+			);
+
+		boolean firstUseful =
+			first != null &&
+			!first.isHidden() &&
+			first.getText() != null &&
+			!first.getText().trim().isEmpty();
+
+		boolean secondUseful =
+			second != null &&
+			!second.isHidden() &&
+			second.getText() != null &&
+			!second.getText().trim().isEmpty();
+
+		if (!firstUseful &&
+			!secondUseful)
+		{
+			return;
+		}
+
+		out.append(
+			"\n--- NATIVE MESBOX WIDGETS ---\n"
+		);
+
+		if (first != null)
+		{
+			out.append(
+				describeWidget(
+					"MES_TEXT",
+					first
+				)
+			).append('\n');
+		}
+
+		if (second != null)
+		{
+			out.append(
+				describeWidget(
+					"MES_TEXT2",
+					second
+				)
+			).append('\n');
 		}
 	}
 }
