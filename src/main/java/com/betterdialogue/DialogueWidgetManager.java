@@ -75,7 +75,6 @@ public class DialogueWidgetManager
 
 	private static final int SPRITE_CHILD_TEXT = 2;
 	private static final int DOUBLE_SPRITE_CHILD_TEXT = 2;
-	private static final int CHATBOX_MESSAGE_CHILD = 43;
 
 	private static final int MAX_SCAN_CHILD = 96;
 	private static final int MAX_SCAN_DEPTH = 5;
@@ -94,6 +93,8 @@ public class DialogueWidgetManager
 
 	private final Map<Widget, Integer> suppressedFontIds =
 		new IdentityHashMap<>();
+
+	private String lastMesboxText = "";
 
 	public DialogueState captureAndTemporarilySuppress()
 	{
@@ -160,16 +161,16 @@ public class DialogueWidgetManager
 			return buildDoubleSpriteState();
 		}
 
-		Widget messageBoxBody =
-			client.getWidget(
-				WidgetID.CHATBOX_GROUP_ID,
-				CHATBOX_MESSAGE_CHILD
-			);
-
 		if (config.replaceSprite() &&
-			isMessageBoxBody(messageBoxBody))
+			!lastMesboxText.isEmpty())
 		{
-			return buildMessageBoxState();
+			DialogueState mesbox =
+				buildMesboxState();
+
+			if (mesbox != null)
+			{
+				return mesbox;
+			}
 		}
 
 		return null;
@@ -218,6 +219,7 @@ public class DialogueWidgetManager
 	public void restoreAll()
 	{
 		restoreSuppressedFontsForPluginLogic();
+		clearMesbox();
 	}
 
 	private DialogueState buildCharacterState(
@@ -356,17 +358,244 @@ public class DialogueWidgetManager
 		);
 	}
 
-	private DialogueState buildMessageBoxState()
+	public void onMesbox(String text)
 	{
-		return buildTextOnlyState(
-			DialogueType.MESSAGE_BOX,
-			WidgetID.CHATBOX_GROUP_ID,
-			CHATBOX_MESSAGE_CHILD,
-			client.getWidget(
-				WidgetID.CHATBOX_GROUP_ID,
-				0
-			),
-			true
+		lastMesboxText = stripTags(text);
+	}
+
+	public void clearMesbox()
+	{
+		lastMesboxText = "";
+	}
+
+	private DialogueState buildMesboxState()
+	{
+		if (lastMesboxText.isEmpty())
+		{
+			return null;
+		}
+
+		Widget[] roots = client.getWidgetRoots();
+
+		if (roots == null)
+		{
+			return null;
+		}
+
+		for (Widget root : roots)
+		{
+			if (root == null || root.isHidden())
+			{
+				continue;
+			}
+
+			Set<Widget> visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
+
+			Widget body =
+				findMesboxBody(
+					root,
+					lastMesboxText,
+					0,
+					visited
+				);
+
+			if (body == null)
+			{
+				continue;
+			}
+
+			StatusCandidate statusCandidate =
+				new StatusCandidate();
+
+			visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
+
+			scanStatus(
+				root,
+				0,
+				visited,
+				statusCandidate
+			);
+
+			Widget status =
+				statusCandidate.score >= 100
+					? statusCandidate.widget
+					: null;
+
+			if (status == body)
+			{
+				status = null;
+			}
+
+			return buildTextOnlyWidgetState(
+				DialogueType.MESSAGE_BOX,
+				body,
+				status
+			);
+		}
+
+		return null;
+	}
+
+	private Widget findMesboxBody(
+		Widget widget,
+		String expected,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (widget == null ||
+			depth > MAX_SCAN_DEPTH + 4 ||
+			!visited.add(widget) ||
+			widget.isHidden())
+		{
+			return null;
+		}
+
+		if (widget.getType() == WidgetType.TEXT)
+		{
+			String actual = stripTags(widget.getText());
+
+			if (!actual.isEmpty() &&
+				(actual.equals(expected) ||
+				 actual.contains(expected) ||
+				 expected.contains(actual)))
+			{
+				return widget;
+			}
+		}
+
+		Widget found =
+			findMesboxBodyInChildren(
+				widget.getStaticChildren(),
+				expected,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		found =
+			findMesboxBodyInChildren(
+				widget.getDynamicChildren(),
+				expected,
+				depth,
+				visited
+			);
+
+		if (found != null)
+		{
+			return found;
+		}
+
+		return findMesboxBodyInChildren(
+			widget.getNestedChildren(),
+			expected,
+			depth,
+			visited
+		);
+	}
+
+	private Widget findMesboxBodyInChildren(
+		Widget[] children,
+		String expected,
+		int depth,
+		Set<Widget> visited)
+	{
+		if (children == null)
+		{
+			return null;
+		}
+
+		for (Widget child : children)
+		{
+			Widget found =
+				findMesboxBody(
+					child,
+					expected,
+					depth + 1,
+					visited
+				);
+
+			if (found != null)
+			{
+				return found;
+			}
+		}
+
+		return null;
+	}
+
+	private DialogueState buildTextOnlyWidgetState(
+		DialogueType type,
+		Widget body,
+		Widget status)
+	{
+		if (!renderableTextWidget(body))
+		{
+			return null;
+		}
+
+		List<TextSegment> segments =
+			parseSegments(
+				body.getText(),
+				color(body.getTextColor())
+			);
+
+		if (segments.isEmpty())
+		{
+			return null;
+		}
+
+		Rectangle bodyBounds = copy(body.getBounds());
+
+		String statusText =
+			status == null ||
+			status.getText() == null
+				? ""
+				: stripTags(status.getText());
+
+		String key =
+			type.name() +
+			"|" +
+			flattenSegments(segments) +
+			"|" +
+			rectKey(bodyBounds);
+
+		suppressGlyphs(body);
+
+		if (config.replaceStatus())
+		{
+			suppressGlyphs(status);
+		}
+
+		return new DialogueState(
+			type,
+			"",
+			segments,
+			null,
+			statusText,
+			bodyBounds,
+			null,
+			null,
+			status == null
+				? null
+				: copy(status.getBounds()),
+			color(body.getTextColor()),
+			null,
+			null,
+			null,
+			status == null
+				? new Color(0x0000FF)
+				: color(status.getTextColor()),
+			key
 		);
 	}
 
@@ -713,28 +942,6 @@ public class DialogueWidgetManager
 		}
 
 		return null;
-	}
-
-	private static boolean isMessageBoxBody(Widget widget)
-	{
-		if (!renderableTextWidget(widget))
-		{
-			return false;
-		}
-
-		String cleaned = stripTags(widget.getText());
-
-		if (cleaned.isEmpty() || isWaitPrompt(cleaned))
-		{
-			return false;
-		}
-
-		String normalized =
-			cleaned.toLowerCase(Locale.ROOT);
-
-		return !normalized.equals("click here to continue") &&
-			!normalized.equals("click to continue") &&
-			!normalized.equals("continue");
 	}
 
 	private static boolean isWaitPrompt(String text)

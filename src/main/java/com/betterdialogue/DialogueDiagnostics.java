@@ -153,6 +153,23 @@ public class DialogueDiagnostics
 		);
 	}
 
+
+	public synchronized void recordMesboxEvent(
+		String message)
+	{
+		if (!config.diagnosticWidgetLog())
+		{
+			return;
+		}
+
+		ensureSession();
+
+		append(
+			"\n[" + now() + "] MESBOX EVENT text=\"" +
+				escape(message) + "\"\n"
+		);
+	}
+
 	public synchronized void recordTextMutation(
 		String source,
 		String action,
@@ -282,7 +299,6 @@ public class DialogueDiagnostics
 			WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID,
 			0
 		);
-		appendMessageBoxIfVisible(out);
 		appendGroupIfVisible(
 			out,
 			"LEVEL_UP",
@@ -298,7 +314,7 @@ public class DialogueDiagnostics
 
 		if (out.length() == 0)
 		{
-			appendUnknownChatboxCandidates(out);
+			appendUnknownContinueDialogue(out);
 		}
 
 		return out.toString();
@@ -333,47 +349,9 @@ public class DialogueDiagnostics
 		);
 	}
 
-	private void appendMessageBoxIfVisible(
+	private void appendUnknownContinueDialogue(
 		StringBuilder out)
 	{
-		Widget message =
-			client.getWidget(
-				WidgetID.CHATBOX_GROUP_ID,
-				43
-			);
-
-		if (message == null ||
-			message.isHidden() ||
-			message.getText() == null ||
-			message.getText().trim().isEmpty())
-		{
-			return;
-		}
-
-		appendGroupIfVisible(
-			out,
-			"MESSAGE_BOX",
-			WidgetID.CHATBOX_GROUP_ID,
-			0
-		);
-	}
-
-	private void appendUnknownChatboxCandidates(
-		StringBuilder out)
-	{
-		Widget chatbox =
-			client.getWidget(
-				WidgetID.CHATBOX_GROUP_ID,
-				0
-			);
-
-		if (chatbox == null ||
-			chatbox.isHidden() ||
-			chatbox.getBounds() == null)
-		{
-			return;
-		}
-
 		Widget[] roots = client.getWidgetRoots();
 
 		if (roots == null)
@@ -381,41 +359,53 @@ public class DialogueDiagnostics
 			return;
 		}
 
-		Rectangle chatBounds =
-			new Rectangle(chatbox.getBounds());
+		for (Widget root : roots)
+		{
+			if (root == null ||
+				root.isHidden() ||
+				!containsStrongStatus(root))
+			{
+				continue;
+			}
 
-		StringBuilder candidates =
-			new StringBuilder();
+			out.append(
+				"\n--- UNKNOWN CONTINUE DIALOGUE rootGroup=" +
+					(root.getId() >>> 16) +
+					" ---\n"
+			);
 
+			Set<Widget> visited =
+				Collections.newSetFromMap(
+					new IdentityHashMap<>()
+				);
+
+			appendWidgetRecursive(
+				out,
+				root,
+				"U ROOT",
+				0,
+				visited
+			);
+		}
+	}
+
+	private boolean containsStrongStatus(
+		Widget root)
+	{
 		Set<Widget> visited =
 			Collections.newSetFromMap(
 				new IdentityHashMap<>()
 			);
 
-		for (Widget root : roots)
-		{
-			scanUnknownChatboxText(
-				candidates,
-				root,
-				chatBounds,
-				0,
-				visited
-			);
-		}
-
-		if (candidates.length() > 0)
-		{
-			out.append(
-				"\n--- UNKNOWN CHATBOX TEXT CANDIDATES ---\n"
-			);
-			out.append(candidates);
-		}
+		return containsStrongStatus(
+			root,
+			0,
+			visited
+		);
 	}
 
-	private void scanUnknownChatboxText(
-		StringBuilder out,
+	private boolean containsStrongStatus(
 		Widget widget,
-		Rectangle chatBounds,
 		int depth,
 		Set<Widget> visited)
 	{
@@ -424,95 +414,76 @@ public class DialogueDiagnostics
 			!visited.add(widget) ||
 			widget.isHidden())
 		{
-			return;
+			return false;
 		}
 
-		int groupId = widget.getId() >>> 16;
-
-		if (!isKnownDialogueGroup(groupId) &&
-			widget.getType() == WidgetType.TEXT &&
-			widget.getText() != null &&
-			!widget.getText().trim().isEmpty())
+		if (widget.getType() == WidgetType.TEXT &&
+			isStrongStatusText(widget.getText()))
 		{
-			Rectangle bounds = widget.getBounds();
-
-			if (bounds != null &&
-				bounds.width > 0 &&
-				bounds.height > 0 &&
-				bounds.intersects(chatBounds))
-			{
-				out.append(
-					describeWidget(
-						"U " +
-							groupId +
-							"." +
-							(widget.getId() & 0xFFFF),
-						widget
-					)
-				).append('\n');
-			}
+			return true;
 		}
 
-		scanUnknownChildren(
-			out,
-			widget.getStaticChildren(),
-			chatBounds,
-			depth,
-			visited
-		);
-
-		scanUnknownChildren(
-			out,
-			widget.getDynamicChildren(),
-			chatBounds,
-			depth,
-			visited
-		);
-
-		scanUnknownChildren(
-			out,
-			widget.getNestedChildren(),
-			chatBounds,
-			depth,
-			visited
-		);
+		return containsStrongStatusInChildren(
+				widget.getStaticChildren(),
+				depth,
+				visited
+			) ||
+			containsStrongStatusInChildren(
+				widget.getDynamicChildren(),
+				depth,
+				visited
+			) ||
+			containsStrongStatusInChildren(
+				widget.getNestedChildren(),
+				depth,
+				visited
+			);
 	}
 
-	private void scanUnknownChildren(
-		StringBuilder out,
+	private boolean containsStrongStatusInChildren(
 		Widget[] children,
-		Rectangle chatBounds,
 		int depth,
 		Set<Widget> visited)
 	{
 		if (children == null)
 		{
-			return;
+			return false;
 		}
 
 		for (Widget child : children)
 		{
-			scanUnknownChatboxText(
-				out,
+			if (containsStrongStatus(
 				child,
-				chatBounds,
 				depth + 1,
-				visited
-			);
+				visited))
+			{
+				return true;
+			}
 		}
+
+		return false;
 	}
 
-	private static boolean isKnownDialogueGroup(
-		int groupId)
+	private static boolean isStrongStatusText(
+		String raw)
 	{
-		return groupId == InterfaceID.DIALOG_NPC ||
-			groupId == InterfaceID.DIALOG_PLAYER ||
-			groupId == InterfaceID.DIALOG_OPTION ||
-			groupId == InterfaceID.DIALOG_SPRITE ||
-			groupId == WidgetID.DIALOG_DOUBLE_SPRITE_GROUP_ID ||
-			groupId == WidgetID.CHATBOX_GROUP_ID ||
-			groupId == WidgetID.LEVEL_UP_GROUP_ID ||
-			groupId == WidgetID.QUEST_COMPLETED_GROUP_ID;
+		if (raw == null)
+		{
+			return false;
+		}
+
+		String text =
+			raw.replaceAll("<[^>]*>", "")
+				.trim()
+				.toLowerCase();
+
+		return text.contains("click here to continue") ||
+			text.contains("click to continue") ||
+			(text.contains("press space") &&
+			 text.contains("continue")) ||
+			(text.contains("spacebar") &&
+			 text.contains("continue")) ||
+			text.contains("please wait");
 	}
 
 	private void appendGroupIfVisible(

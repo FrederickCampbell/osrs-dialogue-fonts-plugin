@@ -28,7 +28,9 @@ package com.betterdialogue;
 import com.google.inject.Provides;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.events.BeforeRender;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
@@ -138,6 +140,21 @@ public class BetterDialoguePlugin extends Plugin
 			widgetManager.captureAndTemporarilySuppress();
 
 		overlay.setState(state);
+	}
+
+
+	@Subscribe
+	public void onChatMessage(ChatMessage event)
+	{
+		if (event.getType() == ChatMessageType.MESBOX)
+		{
+			widgetManager.onMesbox(event.getMessage());
+			diagnostics.recordMesboxEvent(event.getMessage());
+		}
+		else if (event.getType() == ChatMessageType.DIALOG)
+		{
+			widgetManager.clearMesbox();
+		}
 	}
 
 	@Subscribe
