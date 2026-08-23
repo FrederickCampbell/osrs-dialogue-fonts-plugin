@@ -142,7 +142,6 @@ public class BetterDialoguePlugin extends Plugin
 		overlay.setState(state);
 	}
 
-
 	@Subscribe
 	public void onChatMessage(ChatMessage event)
 	{
@@ -158,6 +157,7 @@ public class BetterDialoguePlugin extends Plugin
 	}
 
 	@Subscribe
+
 	public void onConfigChanged(ConfigChanged event)
 	{
 		if (!CONFIG_GROUP.equals(event.getGroup()))
@@ -165,7 +165,11 @@ public class BetterDialoguePlugin extends Plugin
 			return;
 		}
 
-		widgetManager.restoreAll();
+		/*
+		 * A settings change should restore this frame's native font IDs, but
+		 * should not discard a still-active MESBOX event.
+		 */
+		widgetManager.restoreSuppressedFontsForPluginLogic();
 
 		if ("replaceNpc".equals(event.getKey()) ||
 			"replacePlayer".equals(event.getKey()) ||
@@ -187,7 +191,3 @@ public class BetterDialoguePlugin extends Plugin
 		);
 	}
 }
-
-
-
-

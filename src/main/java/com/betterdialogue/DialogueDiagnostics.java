@@ -27,8 +27,6 @@ import java.util.Set;
 @Singleton
 public class DialogueDiagnostics
 {
-	private long v8MesboxProbeUntil = 0L;
-
 	private static final DateTimeFormatter TIME =
 		DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
 
@@ -155,10 +153,6 @@ public class DialogueDiagnostics
 		);
 	}
 
-
-
-
-
 	public synchronized void recordMesboxEvent(
 		String message)
 	{
@@ -169,18 +163,11 @@ public class DialogueDiagnostics
 
 		ensureSession();
 
-		v8MesboxProbeUntil =
-			System.currentTimeMillis() + 2000L;
-
 		append(
 			"\n[" + now() +
 				"] MESBOX EVENT text=\"" +
 				escape(message) +
 				"\"\n"
-		);
-
-		appendV8ChatboxTextProbe(
-			"MESBOX EVENT"
 		);
 	}
 
@@ -205,8 +192,6 @@ public class DialogueDiagnostics
 				" after=\"" + escape(after) + "\"\n"
 		);
 	}
-
-
 
 	public synchronized void recordFontMutation(
 		String source,
@@ -315,6 +300,12 @@ public class DialogueDiagnostics
 		);
 		appendGroupIfVisible(
 			out,
+			"MESSAGE_BOX",
+			net.runelite.api.gameval.InterfaceID.MESSAGEBOX,
+			0
+		);
+		appendGroupIfVisible(
+			out,
 			"LEVEL_UP",
 			WidgetID.LEVEL_UP_GROUP_ID,
 			0
@@ -326,23 +317,17 @@ public class DialogueDiagnostics
 			0
 		);
 
-		appendV6NativeMesboxSnapshot(out);
-
+		/*
+		 * Keep one generic fallback for genuinely new Jagex dialogue
+		 * interfaces. It runs only when no known dialogue is visible.
+		 */
 		if (out.length() == 0)
 		{
 			appendUnknownContinueDialogue(out);
 		}
 
-		appendV7MesLayerSnapshot(out);
-
-		if (System.currentTimeMillis() <= v8MesboxProbeUntil)
-		{
-			appendV8ChatboxTextSnapshot(out);
-		}
-
 		return out.toString();
 	}
-
 
 	private void archivePreviousLog()
 		throws IOException
@@ -668,315 +653,4 @@ public class DialogueDiagnostics
 		}
 	}
 
-
-	private void appendV6NativeMesboxSnapshot(
-		StringBuilder out)
-	{
-		Widget first =
-			client.getWidget(
-				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT
-			);
-
-		Widget second =
-			client.getWidget(
-				net.runelite.api.gameval.InterfaceID.Chatbox.MES_TEXT2
-			);
-
-		boolean firstUseful =
-			first != null &&
-			!first.isHidden() &&
-			first.getText() != null &&
-			!first.getText().trim().isEmpty();
-
-		boolean secondUseful =
-			second != null &&
-			!second.isHidden() &&
-			second.getText() != null &&
-			!second.getText().trim().isEmpty();
-
-		if (!firstUseful &&
-			!secondUseful)
-		{
-			return;
-		}
-
-		out.append(
-			"\n--- NATIVE MESBOX WIDGETS ---\n"
-		);
-
-		if (first != null)
-		{
-			out.append(
-				describeWidget(
-					"MES_TEXT",
-					first
-				)
-			).append('\n');
-		}
-
-		if (second != null)
-		{
-			out.append(
-				describeWidget(
-					"MES_TEXT2",
-					second
-				)
-			).append('\n');
-		}
-	}
-
-
-	private void appendV7MesLayerSnapshot(
-		StringBuilder out)
-	{
-		Widget layer =
-			client.getWidget(
-				net.runelite.api.gameval.InterfaceID.Chatbox.MES_LAYER
-			);
-
-		if (layer == null)
-		{
-			return;
-		}
-
-		Set<Widget> probeVisited =
-			Collections.newSetFromMap(
-				new IdentityHashMap<>()
-			);
-
-		if (!v7LayerHasText(
-			layer,
-			0,
-			probeVisited))
-		{
-			return;
-		}
-
-		out.append(
-			"\n--- MES_LAYER LIVE TREE ---\n"
-		);
-
-		Set<Widget> visited =
-			Collections.newSetFromMap(
-				new IdentityHashMap<>()
-			);
-
-		appendWidgetRecursive(
-			out,
-			layer,
-			"MES_LAYER",
-			0,
-			visited
-		);
-	}
-
-	private boolean v7LayerHasText(
-		Widget widget,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (widget == null ||
-			depth > MAX_DEPTH + 8 ||
-			!visited.add(widget))
-		{
-			return false;
-		}
-
-		if (widget.getType() == WidgetType.TEXT &&
-			widget.getText() != null &&
-			!widget.getText().trim().isEmpty())
-		{
-			return true;
-		}
-
-		return v7ChildrenHaveText(
-				widget.getChildren(),
-				depth,
-				visited
-			) ||
-			v7ChildrenHaveText(
-				widget.getStaticChildren(),
-				depth,
-				visited
-			) ||
-			v7ChildrenHaveText(
-				widget.getDynamicChildren(),
-				depth,
-				visited
-			) ||
-			v7ChildrenHaveText(
-				widget.getNestedChildren(),
-				depth,
-				visited
-			);
-	}
-
-	private boolean v7ChildrenHaveText(
-		Widget[] children,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (children == null)
-		{
-			return false;
-		}
-
-		for (Widget child : children)
-		{
-			if (v7LayerHasText(
-				child,
-				depth + 1,
-				visited))
-			{
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-
-	private void appendV8ChatboxTextProbe(
-		String reason)
-	{
-		StringBuilder out =
-			new StringBuilder();
-
-		out.append("--- CHATBOX TEXT PROBE ")
-			.append(reason)
-			.append(" ---\n");
-
-		appendV8ChatboxTextWidgets(out);
-
-		append(out.toString());
-	}
-
-	private void appendV8ChatboxTextSnapshot(
-		StringBuilder out)
-	{
-		out.append(
-			"\n--- CHATBOX TEXT PROBE POST-MESBOX ---\n"
-		);
-
-		appendV8ChatboxTextWidgets(out);
-	}
-
-	private void appendV8ChatboxTextWidgets(
-		StringBuilder out)
-	{
-		Set<Widget> globalVisited =
-			Collections.newSetFromMap(
-				new IdentityHashMap<>()
-			);
-
-		for (int child = 0;
-			child < MAX_TOP_LEVEL_CHILD + 64;
-			child++)
-		{
-			Widget top =
-				client.getWidget(
-					net.runelite.api.widgets.WidgetID.CHATBOX_GROUP_ID,
-					child
-				);
-
-			if (top == null)
-			{
-				continue;
-			}
-
-			appendV8TextRecursive(
-				out,
-				top,
-				"C162." + child,
-				0,
-				globalVisited
-			);
-		}
-	}
-
-	private void appendV8TextRecursive(
-		StringBuilder out,
-		Widget widget,
-		String path,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (widget == null ||
-			depth > MAX_DEPTH + 10 ||
-			!visited.add(widget))
-		{
-			return;
-		}
-
-		if (widget.getType() == WidgetType.TEXT &&
-			widget.getText() != null &&
-			!widget.getText().trim().isEmpty())
-		{
-			out.append(
-				describeWidget(
-					path,
-					widget
-				)
-			).append('\n');
-		}
-
-		appendV8TextChildren(
-			out,
-			widget.getChildren(),
-			path + "/C",
-			depth,
-			visited
-		);
-
-		appendV8TextChildren(
-			out,
-			widget.getStaticChildren(),
-			path + "/S",
-			depth,
-			visited
-		);
-
-		appendV8TextChildren(
-			out,
-			widget.getDynamicChildren(),
-			path + "/D",
-			depth,
-			visited
-		);
-
-		appendV8TextChildren(
-			out,
-			widget.getNestedChildren(),
-			path + "/N",
-			depth,
-			visited
-		);
-	}
-
-	private void appendV8TextChildren(
-		StringBuilder out,
-		Widget[] children,
-		String prefix,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (children == null)
-		{
-			return;
-		}
-
-		for (int i = 0;
-			i < children.length;
-			i++)
-		{
-			appendV8TextRecursive(
-				out,
-				children[i],
-				prefix + "[" + i + "]",
-				depth + 1,
-				visited
-			);
-		}
-	}
 }
-

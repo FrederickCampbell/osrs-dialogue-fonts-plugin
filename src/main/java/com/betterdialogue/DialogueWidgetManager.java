@@ -301,11 +301,7 @@ public class DialogueWidgetManager
 
 		suppressGlyphs(body);
 
-		if (config.replaceNpc() ||
-			config.replacePlayer())
-		{
-			suppressGlyphs(name);
-		}
+		suppressGlyphs(name);
 
 		if (config.replaceStatus())
 		{
@@ -330,7 +326,6 @@ public class DialogueWidgetManager
 			key
 		);
 	}
-
 
 	private DialogueState buildSpriteState(
 		Widget spriteRoot)
@@ -360,16 +355,13 @@ public class DialogueWidgetManager
 
 	public void onMesbox(String text)
 	{
-		lastMesboxText = stripTags(text);
+		lastMesboxText = normalizeDialogueText(text);
 	}
 
 	public void clearMesbox()
 	{
 		lastMesboxText = "";
 	}
-
-
-
 
 	private DialogueState buildMesboxState()
 	{
@@ -378,183 +370,82 @@ public class DialogueWidgetManager
 			return null;
 		}
 
-		Widget body =
-			v8FindChatboxText(
-				lastMesboxText,
-				false
-			);
+		/*
+		 * MESBOX messages render through InterfaceID.MESSAGEBOX (group 229).
+		 * The generated gameval constants give us the exact body and status
+		 * widgets, so narration capture is constant-time.
+		 */
+		Widget body = client.getWidget(
+			net.runelite.api.gameval.InterfaceID.Messagebox.TEXT
+		);
 
-		if (body == null)
+		if (!renderableTextWidget(body))
 		{
 			return null;
 		}
 
-		Widget status =
-			v8FindChatboxText(
-				"Click here to continue",
-				true
-			);
+		String liveText = normalizeDialogueText(body.getText());
 
-		if (status == null)
+		/*
+		 * ChatMessage can arrive just before the widget finishes updating.
+		 * Keep the event text cached and simply retry on the next render.
+		 */
+		if (!dialogueTextMatches(liveText, lastMesboxText))
 		{
-			status =
-				v8FindChatboxText(
-					"Please wait...",
-					true
-				);
+			return null;
 		}
 
-		if (status == body)
+		Widget status = client.getWidget(
+			net.runelite.api.gameval.InterfaceID.Messagebox.CONTINUE
+		);
+
+		if (!renderableTextWidget(status))
 		{
 			status = null;
 		}
 
-		List<TextSegment> segments =
-			parseSegments(
-				body.getText(),
-				color(body.getTextColor())
-			);
-
-		if (segments.isEmpty())
-		{
-			return null;
-		}
-
-		Rectangle bodyBounds =
-			copy(body.getBounds());
-
-		String statusText =
-			status == null ||
-			status.getText() == null
-				? ""
-				: stripTags(status.getText());
-
-		String key =
-			DialogueType.MESSAGE_BOX.name() +
-			"|" +
-			flattenSegments(segments) +
-			"|" +
-			rectKey(bodyBounds);
-
-		suppressGlyphs(body);
-
-		if (config.replaceStatus())
-		{
-			suppressGlyphs(status);
-		}
-
-		return new DialogueState(
+		return buildTextOnlyWidgetState(
 			DialogueType.MESSAGE_BOX,
-			"",
-			segments,
-			null,
-			statusText,
-			bodyBounds,
-			null,
-			null,
-			status == null
-				? null
-				: copy(status.getBounds()),
-			color(body.getTextColor()),
-			null,
-			null,
-			null,
-			status == null
-				? new Color(0x0000FF)
-				: color(status.getTextColor()),
-			key
+			body,
+			status
 		);
 	}
 
-	private Widget findMesboxBody(
-		Widget widget,
-		String expected,
-		int depth,
-		Set<Widget> visited)
+	private static boolean dialogueTextMatches(
+		String actual,
+		String expected)
 	{
-		if (widget == null ||
-			depth > MAX_SCAN_DEPTH + 4 ||
-			!visited.add(widget) ||
-			widget.isHidden())
+		if (actual.isEmpty() || expected.isEmpty())
 		{
-			return null;
+			return false;
 		}
 
-		if (widget.getType() == WidgetType.TEXT)
+		if (actual.equals(expected))
 		{
-			String actual = stripTags(widget.getText());
-
-			if (!actual.isEmpty() &&
-				(actual.equals(expected) ||
-				 actual.contains(expected) ||
-				 expected.contains(actual)))
-			{
-				return widget;
-			}
+			return true;
 		}
 
-		Widget found =
-			findMesboxBodyInChildren(
-				widget.getStaticChildren(),
-				expected,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			findMesboxBodyInChildren(
-				widget.getDynamicChildren(),
-				expected,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		return findMesboxBodyInChildren(
-			widget.getNestedChildren(),
-			expected,
-			depth,
-			visited
+		int shorter = Math.min(
+			actual.length(),
+			expected.length()
 		);
+
+		return shorter >= 10 &&
+			(actual.contains(expected) ||
+			 expected.contains(actual));
 	}
 
-	private Widget findMesboxBodyInChildren(
-		Widget[] children,
-		String expected,
-		int depth,
-		Set<Widget> visited)
+	private static String normalizeDialogueText(
+		String raw)
 	{
-		if (children == null)
+		if (raw == null)
 		{
-			return null;
+			return "";
 		}
 
-		for (Widget child : children)
-		{
-			Widget found =
-				findMesboxBody(
-					child,
-					expected,
-					depth + 1,
-					visited
-				);
-
-			if (found != null)
-			{
-				return found;
-			}
-		}
-
-		return null;
+		return stripTags(
+			raw.replace('\u00A0', ' ')
+		);
 	}
 
 	private DialogueState buildTextOnlyWidgetState(
@@ -630,89 +521,36 @@ public class DialogueWidgetManager
 		Widget root,
 		boolean strongStatusOnly)
 	{
-		Widget body =
-			client.getWidget(groupId, bodyChild);
+		Widget body = client.getWidget(
+			groupId,
+			bodyChild
+		);
 
 		if (!renderableTextWidget(body))
 		{
 			return null;
 		}
 
-		Widget status =
-			findStatusWidget(
-				groupId,
-				-1,
-				root
-			);
+		Widget status = findStatusWidget(
+			groupId,
+			-1,
+			root
+		);
 
-		if (status == body)
+		if (status == body ||
+			(strongStatusOnly &&
+			 status != null &&
+			 scoreStatusWidget(status) < 100))
 		{
 			status = null;
 		}
 
-		if (strongStatusOnly &&
-			status != null &&
-			scoreStatusWidget(status) < 100)
-		{
-			status = null;
-		}
-
-		List<TextSegment> segments =
-			parseSegments(
-				body.getText(),
-				color(body.getTextColor())
-			);
-
-		if (segments.isEmpty())
-		{
-			return null;
-		}
-
-		Rectangle bodyBounds = copy(body.getBounds());
-
-		String statusText =
-			status == null ||
-			status.getText() == null
-				? ""
-				: stripTags(status.getText());
-
-		String key =
-			type.name() +
-			"|" +
-			flattenSegments(segments) +
-			"|" +
-			rectKey(bodyBounds);
-
-		suppressGlyphs(body);
-
-		if (config.replaceStatus())
-		{
-			suppressGlyphs(status);
-		}
-
-		return new DialogueState(
+		return buildTextOnlyWidgetState(
 			type,
-			"",
-			segments,
-			null,
-			statusText,
-			bodyBounds,
-			null,
-			null,
-			status == null
-				? null
-				: copy(status.getBounds()),
-			color(body.getTextColor()),
-			null,
-			null,
-			null,
-			status == null
-				? new Color(0x0000FF)
-				: color(status.getTextColor()),
-			key
+			body,
+			status
 		);
 	}
-
 
 	private DialogueState buildOptionState(
 		Widget container)
@@ -1390,621 +1228,4 @@ public class DialogueWidgetManager
 		private int score;
 	}
 
-
-	private static boolean v6MesboxMatches(
-		Widget widget,
-		String expected)
-	{
-		if (!renderableTextWidget(widget))
-		{
-			return false;
-		}
-
-		String actual =
-			v6NormalizeMesbox(
-				widget.getText()
-			);
-
-		String wanted =
-			v6NormalizeMesbox(expected);
-
-		if (actual.isEmpty() ||
-			wanted.isEmpty())
-		{
-			return false;
-		}
-
-		if (actual.equals(wanted))
-		{
-			return true;
-		}
-
-		int shorter =
-			Math.min(
-				actual.length(),
-				wanted.length()
-			);
-
-		return shorter >= 12 &&
-			(actual.contains(wanted) ||
-			 wanted.contains(actual));
-	}
-
-	private static boolean v6UsableMesboxBody(
-		Widget widget)
-	{
-		if (!renderableTextWidget(widget))
-		{
-			return false;
-		}
-
-		String text =
-			v6NormalizeMesbox(
-				widget.getText()
-			);
-
-		return !text.isEmpty() &&
-			!v6StatusText(text);
-	}
-
-	private static boolean v6StatusText(
-		String raw)
-	{
-		String text =
-			v6NormalizeMesbox(raw)
-				.toLowerCase(Locale.ROOT);
-
-		return text.contains(
-				"click here to continue"
-			) ||
-			text.contains(
-				"click to continue"
-			) ||
-			(text.contains("press space") &&
-			 text.contains("continue")) ||
-			(text.contains("spacebar") &&
-			 text.contains("continue")) ||
-			text.contains("please wait");
-	}
-
-	private static String v6NormalizeMesbox(
-		String raw)
-	{
-		if (raw == null)
-		{
-			return "";
-		}
-
-		String withBreakSpaces =
-			raw.replaceAll(
-				"(?i)<br\\s*/?>",
-				" "
-			);
-
-		return stripTags(withBreakSpaces)
-			.replace('\u00A0', ' ')
-			.replaceAll("\\s+", " ")
-			.trim();
-	}
-
-
-	private Widget v7FindMesboxText(
-		Widget widget,
-		String expected,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (widget == null ||
-			depth > MAX_SCAN_DEPTH + 8 ||
-			!visited.add(widget))
-		{
-			return null;
-		}
-
-		if (v7MesboxMatches(
-			widget,
-			expected))
-		{
-			return widget;
-		}
-
-		Widget found =
-			v7FindMesboxTextInChildren(
-				widget.getChildren(),
-				expected,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			v7FindMesboxTextInChildren(
-				widget.getStaticChildren(),
-				expected,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			v7FindMesboxTextInChildren(
-				widget.getDynamicChildren(),
-				expected,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		return v7FindMesboxTextInChildren(
-			widget.getNestedChildren(),
-			expected,
-			depth,
-			visited
-		);
-	}
-
-	private Widget v7FindMesboxTextInChildren(
-		Widget[] children,
-		String expected,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (children == null)
-		{
-			return null;
-		}
-
-		for (Widget child : children)
-		{
-			Widget found =
-				v7FindMesboxText(
-					child,
-					expected,
-					depth + 1,
-					visited
-				);
-
-			if (found != null)
-			{
-				return found;
-			}
-		}
-
-		return null;
-	}
-
-	private static boolean v7MesboxMatches(
-		Widget widget,
-		String expected)
-	{
-		if (widget == null ||
-			widget.getType() != WidgetType.TEXT ||
-			widget.getText() == null)
-		{
-			return false;
-		}
-
-		String actual =
-			v7Normalize(
-				widget.getText()
-			);
-
-		String wanted =
-			v7Normalize(expected);
-
-		if (actual.isEmpty() ||
-			wanted.isEmpty() ||
-			v7StatusText(actual))
-		{
-			return false;
-		}
-
-		if (actual.equals(wanted))
-		{
-			return true;
-		}
-
-		int shorter =
-			Math.min(
-				actual.length(),
-				wanted.length()
-			);
-
-		return shorter >= 10 &&
-			(actual.contains(wanted) ||
-			 wanted.contains(actual));
-	}
-
-	private Widget v7FindStatus(
-		Widget widget,
-		int depth,
-		Set<Widget> visited,
-		Widget body)
-	{
-		if (widget == null ||
-			depth > MAX_SCAN_DEPTH + 8 ||
-			!visited.add(widget))
-		{
-			return null;
-		}
-
-		if (widget != body &&
-			widget.getType() == WidgetType.TEXT &&
-			widget.getText() != null &&
-			v7StatusText(widget.getText()) &&
-			renderableTextWidget(widget))
-		{
-			return widget;
-		}
-
-		Widget found =
-			v7FindStatusInChildren(
-				widget.getChildren(),
-				depth,
-				visited,
-				body
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			v7FindStatusInChildren(
-				widget.getStaticChildren(),
-				depth,
-				visited,
-				body
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			v7FindStatusInChildren(
-				widget.getDynamicChildren(),
-				depth,
-				visited,
-				body
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		return v7FindStatusInChildren(
-			widget.getNestedChildren(),
-			depth,
-			visited,
-			body
-		);
-	}
-
-	private Widget v7FindStatusInChildren(
-		Widget[] children,
-		int depth,
-		Set<Widget> visited,
-		Widget body)
-	{
-		if (children == null)
-		{
-			return null;
-		}
-
-		for (Widget child : children)
-		{
-			Widget found =
-				v7FindStatus(
-					child,
-					depth + 1,
-					visited,
-					body
-				);
-
-			if (found != null)
-			{
-				return found;
-			}
-		}
-
-		return null;
-	}
-
-	private static boolean v7StatusText(
-		String raw)
-	{
-		String text =
-			v7Normalize(raw)
-				.toLowerCase(Locale.ROOT);
-
-		return text.contains(
-				"click here to continue"
-			) ||
-			text.contains(
-				"click to continue"
-			) ||
-			(text.contains("press space") &&
-			 text.contains("continue")) ||
-			(text.contains("spacebar") &&
-			 text.contains("continue")) ||
-			text.contains("please wait");
-	}
-
-	private static String v7Normalize(
-		String raw)
-	{
-		if (raw == null)
-		{
-			return "";
-		}
-
-		String withBreakSpaces =
-			raw.replaceAll(
-				"(?i)<br\\s*/?>",
-				" "
-			);
-
-		return stripTags(withBreakSpaces)
-			.replace('\u00A0', ' ')
-			.replaceAll("\\s+", " ")
-			.trim();
-	}
-
-
-	private Widget v8FindChatboxText(
-		String expected,
-		boolean exactStatus)
-	{
-		Widget hiddenFallback = null;
-
-		for (int child = 0;
-			child < MAX_SCAN_CHILD + 64;
-			child++)
-		{
-			Widget top =
-				client.getWidget(
-					net.runelite.api.widgets.WidgetID.CHATBOX_GROUP_ID,
-					child
-				);
-
-			if (top == null)
-			{
-				continue;
-			}
-
-			Set<Widget> visited =
-				Collections.newSetFromMap(
-					new IdentityHashMap<>()
-				);
-
-			Widget visible =
-				v8FindMatchingTextRecursive(
-					top,
-					expected,
-					exactStatus,
-					true,
-					0,
-					visited
-				);
-
-			if (visible != null)
-			{
-				return visible;
-			}
-
-			if (hiddenFallback == null)
-			{
-				visited =
-					Collections.newSetFromMap(
-						new IdentityHashMap<>()
-					);
-
-				hiddenFallback =
-					v8FindMatchingTextRecursive(
-						top,
-						expected,
-						exactStatus,
-						false,
-						0,
-						visited
-					);
-			}
-		}
-
-		return hiddenFallback;
-	}
-
-	private Widget v8FindMatchingTextRecursive(
-		Widget widget,
-		String expected,
-		boolean exactStatus,
-		boolean requireVisible,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (widget == null ||
-			depth > MAX_SCAN_DEPTH + 10 ||
-			!visited.add(widget))
-		{
-			return null;
-		}
-
-		if (widget.getType() == WidgetType.TEXT &&
-			widget.getText() != null &&
-			(!requireVisible ||
-			 renderableTextWidget(widget)))
-		{
-			String actual =
-				v8Normalize(
-					widget.getText()
-				);
-
-			String wanted =
-				v8Normalize(expected);
-
-			boolean match =
-				exactStatus
-					? actual.equalsIgnoreCase(wanted)
-					: v8BodyTextMatches(
-						actual,
-						wanted
-					);
-
-			if (match)
-			{
-				return widget;
-			}
-		}
-
-		Widget found =
-			v8FindInChildren(
-				widget.getChildren(),
-				expected,
-				exactStatus,
-				requireVisible,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			v8FindInChildren(
-				widget.getStaticChildren(),
-				expected,
-				exactStatus,
-				requireVisible,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		found =
-			v8FindInChildren(
-				widget.getDynamicChildren(),
-				expected,
-				exactStatus,
-				requireVisible,
-				depth,
-				visited
-			);
-
-		if (found != null)
-		{
-			return found;
-		}
-
-		return v8FindInChildren(
-			widget.getNestedChildren(),
-			expected,
-			exactStatus,
-			requireVisible,
-			depth,
-			visited
-		);
-	}
-
-	private Widget v8FindInChildren(
-		Widget[] children,
-		String expected,
-		boolean exactStatus,
-		boolean requireVisible,
-		int depth,
-		Set<Widget> visited)
-	{
-		if (children == null)
-		{
-			return null;
-		}
-
-		for (Widget child : children)
-		{
-			Widget found =
-				v8FindMatchingTextRecursive(
-					child,
-					expected,
-					exactStatus,
-					requireVisible,
-					depth + 1,
-					visited
-				);
-
-			if (found != null)
-			{
-				return found;
-			}
-		}
-
-		return null;
-	}
-
-	private static boolean v8BodyTextMatches(
-		String actual,
-		String wanted)
-	{
-		if (actual.isEmpty() ||
-			wanted.isEmpty())
-		{
-			return false;
-		}
-
-		if (actual.equals(wanted))
-		{
-			return true;
-		}
-
-		int shorter =
-			Math.min(
-				actual.length(),
-				wanted.length()
-			);
-
-		return shorter >= 10 &&
-			(actual.contains(wanted) ||
-			 wanted.contains(actual));
-	}
-
-	private static String v8Normalize(
-		String raw)
-	{
-		if (raw == null)
-		{
-			return "";
-		}
-
-		String withBreakSpaces =
-			raw.replaceAll(
-				"(?i)<br\\s*/?>",
-				" "
-			);
-
-		return stripTags(withBreakSpaces)
-			.replace('\u00A0', ' ')
-			.replaceAll("\\s+", " ")
-			.trim();
-	}
 }
-
